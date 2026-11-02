@@ -1,0 +1,16 @@
+[package]
+name = "shell"
+description = "A command interpreter driven over a channel: the first program init spawns"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "shell"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+sprout-rt = { path = "../../lib/sprout-rt" }

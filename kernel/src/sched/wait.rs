@@ -1,4 +1,5 @@
-//! Wait queues: block until someone says a condition may have changed.
+//! Wait queues: block until someone says a condition may have changed,
+//! optionally giving up at a deadline.
 //!
 //! `wait_while` checks the condition, enqueues and blocks with interrupts
 //! off, so on one hart a wake-up cannot slip in between the check and the
@@ -7,8 +8,8 @@
 use alloc::vec::Vec;
 
 use super::{Next, ThreadId, current_id, schedule, wake};
-use crate::arch;
 use crate::sync::SpinLock;
+use crate::{arch, time};
 
 pub struct WaitQueue {
     waiters: SpinLock<Vec<ThreadId>>,
@@ -22,13 +23,33 @@ impl WaitQueue {
     }
 
     /// Blocks while `condition` holds, re-checking after every wake-up.
-    pub fn wait_while(&self, mut condition: impl FnMut() -> bool) {
+    pub fn wait_while(&self, condition: impl FnMut() -> bool) {
+        self.wait_while_until(condition, None);
+    }
+
+    /// Blocks while `condition` holds or until the tick count reaches
+    /// `deadline`. Returns `false` if it gave up with the condition still
+    /// true.
+    pub fn wait_while_until(
+        &self,
+        mut condition: impl FnMut() -> bool,
+        deadline: Option<u64>,
+    ) -> bool {
         let interrupts_were_enabled = arch::interrupts::disable();
+        let me = current_id();
+        let mut cleared = true;
         while condition() {
-            self.waiters.lock().push(current_id());
-            schedule(Next::Block);
+            if deadline.is_some_and(|d| time::ticks() >= d) {
+                cleared = false;
+                break;
+            }
+            self.waiters.lock().push(me);
+            schedule(Next::Block { until: deadline });
+            // Whether woken or timed out, we are no longer waiting here.
+            self.waiters.lock().retain(|&id| id != me);
         }
         arch::interrupts::restore(interrupts_were_enabled);
+        cleared
     }
 
     /// Readies every waiter. They re-check their conditions.
@@ -39,7 +60,7 @@ impl WaitQueue {
         }
     }
 
-    /// Readies the longest-waiting thread, if any. Channels use this at M5.
+    /// Readies the longest-waiting thread, if any.
     #[allow(dead_code)]
     pub fn wake_one(&self) {
         let id = {
@@ -87,6 +108,16 @@ mod tests {
             join(a);
             join(b);
             assert_eq!(WOKE.load(Ordering::Relaxed), 2);
+        }
+    }
+
+    crate::ktest! {
+        fn wait_with_deadline_gives_up() {
+            let queue = WaitQueue::new();
+            let deadline = time::ticks() + 2;
+            let cleared = queue.wait_while_until(|| true, Some(deadline));
+            assert!(!cleared);
+            assert!(time::ticks() >= deadline);
         }
     }
 }

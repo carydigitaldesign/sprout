@@ -39,8 +39,13 @@ pub const STACK_FRAMES: usize = 4;
 enum State {
     Ready,
     Running,
-    Sleeping { until: u64 },
-    Blocked,
+    Sleeping {
+        until: u64,
+    },
+    /// Waiting to be woken, giving up at `until` if set.
+    Blocked {
+        until: Option<u64>,
+    },
     Exited,
 }
 
@@ -219,7 +224,7 @@ extern "C" fn trampoline() -> ! {
 enum Next {
     Yield,
     Sleep { until: u64 },
-    Block,
+    Block { until: Option<u64> },
     Exit,
 }
 
@@ -240,8 +245,8 @@ fn schedule(why: Next) {
                 thread(cur).state = State::Sleeping { until };
                 s.sleeping.push(cur);
             }
-            Next::Block => {
-                thread(cur).state = State::Blocked;
+            Next::Block { until } => {
+                thread(cur).state = State::Blocked { until };
                 s.blocked.push(cur);
             }
             Next::Exit => {
@@ -304,8 +309,8 @@ pub fn sleep_until(until: u64) {
     schedule(Next::Sleep { until });
 }
 
-/// Timer tick: readies sleepers that are due. Returns whether the current
-/// thread should give way.
+/// Timer tick: readies sleepers and timed-out blockers that are due.
+/// Returns whether the current thread should give way.
 pub fn on_tick(now: u64) -> bool {
     with(|s| {
         let mut i = 0;
@@ -313,6 +318,17 @@ pub fn on_tick(now: u64) -> bool {
             let p = s.sleeping[i];
             if matches!(thread(p).state, State::Sleeping { until } if until <= now) {
                 s.sleeping.swap_remove(i);
+                thread(p).state = State::Ready;
+                s.run_queue.push_back(p);
+            } else {
+                i += 1;
+            }
+        }
+        let mut i = 0;
+        while i < s.blocked.len() {
+            let p = s.blocked[i];
+            if matches!(thread(p).state, State::Blocked { until: Some(until) } if until <= now) {
+                s.blocked.swap_remove(i);
                 thread(p).state = State::Ready;
                 s.run_queue.push_back(p);
             } else {

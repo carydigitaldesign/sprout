@@ -47,6 +47,22 @@ pub fn init() {
     interrupts::enable_external_source();
 }
 
+/// Masks or unmasks `source` for this context.
+pub fn set_source_enabled(source: u32, enabled: bool) {
+    let index = source as usize;
+    let reg = ENABLE_BASE + CONTEXT * ENABLE_STRIDE + 4 * (index / 32);
+    let bit = 1u32 << (index % 32);
+    let current = read(reg);
+    write(
+        reg,
+        if enabled {
+            current | bit
+        } else {
+            current & !bit
+        },
+    );
+}
+
 /// Routes `source` to `handler` at `priority` (1 is lowest that passes).
 pub fn enable(source: u32, priority: u32, handler: Handler) {
     let index = source as usize;
@@ -56,8 +72,7 @@ pub fn enable(source: u32, priority: u32, handler: Handler) {
     );
     HANDLERS.lock()[index] = Some(handler);
     write(PRIORITY_BASE + 4 * index, priority);
-    let enable = ENABLE_BASE + CONTEXT * ENABLE_STRIDE + 4 * (index / 32);
-    write(enable, read(enable) | (1 << (index % 32)));
+    set_source_enabled(source, true);
 }
 
 /// Priority currently programmed for `source`.

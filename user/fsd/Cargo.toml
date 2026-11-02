@@ -1,0 +1,16 @@
+[package]
+name = "fsd"
+description = "Serves files from the initramfs as VMOs over a channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fsd"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+sprout-rt = { path = "../../lib/sprout-rt" }

@@ -42,12 +42,12 @@ pub struct Fdt<'a> {
     total_size: usize,
 }
 
-fn be32(bytes: &[u8], offset: usize) -> Option<u32> {
+pub(crate) fn be32(bytes: &[u8], offset: usize) -> Option<u32> {
     let b = bytes.get(offset..offset + 4)?;
     Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-fn be64(bytes: &[u8], offset: usize) -> Option<u64> {
+pub(crate) fn be64(bytes: &[u8], offset: usize) -> Option<u64> {
     let hi = be32(bytes, offset)? as u64;
     let lo = be32(bytes, offset + 4)? as u64;
     Some((hi << 32) | lo)

@@ -73,7 +73,28 @@ pub fn object(handle: Handle, entry: &Entry) -> String {
                 .num("mapped_bytes", p.mapped_bytes());
         }
         Object::Vmo(v) => {
-            j.num("size", v.lock().size());
+            let v = v.lock();
+            j.num("size", v.size())
+                .bool("contiguous", v.is_contiguous());
+        }
+        Object::Channel(c) => {
+            j.num("pending", c.pending())
+                .bool("peer_closed", c.peer_closed());
+        }
+        Object::Port(p) => {
+            j.num("attachments", p.attachment_count());
+        }
+        Object::Device(d) => {
+            j.str("kind", d.kind)
+                .hex("base", d.base)
+                .num("size", d.size)
+                .num("irq", d.irq)
+                .num("virtio_id", d.virtio_id)
+                .str(
+                    "virtio_device",
+                    crate::obj::device::virtio_device_name(d.virtio_id),
+                )
+                .num("pending_irqs", d.pending_irqs());
         }
     }
     j.array("ops");
@@ -97,15 +118,17 @@ crate::ktest! {
             let needle = alloc::format!(r#""name":"{}""#, s.name);
             assert!(text.contains(&needle), "missing {}", s.name);
         }
-        assert!(text.contains(r#""object_types":["process","thread","vmo","address_space"]"#));
+        assert!(text.contains(
+            r#""object_types":["process","thread","vmo","address_space","channel","port","device"]"#
+        ));
     }
 }
 
 crate::ktest! {
     fn vmo_description_reflects_rights() {
-        use alloc::sync::Arc;
         use crate::mm::vmo::Vmo;
         use crate::sync::SpinLock;
+        use alloc::sync::Arc;
         use sprout_abi::Rights;
 
         let vmo = Object::Vmo(Arc::new(SpinLock::new(Vmo::new(8192).expect("vmo"))));
@@ -117,5 +140,28 @@ crate::ktest! {
         assert!(text.contains(r#""object":"vmo","handle":7,"rights":["read","describe"],"size":8192"#));
         assert!(text.contains(r#""name":"vmo_read","allowed":true"#));
         assert!(text.contains(r#""name":"vmo_write","allowed":false"#));
+    }
+}
+
+crate::ktest! {
+    fn channel_description_shows_queue_state() {
+        use crate::obj::channel::{Endpoint, Message};
+        use sprout_abi::Rights;
+
+        let (a, b) = Endpoint::pair();
+        a.send(Message {
+            bytes: alloc::vec![1, 2, 3],
+            handles: alloc::vec::Vec::new(),
+        })
+        .expect("send");
+        drop(a);
+        let entry = Entry {
+            object: Object::Channel(b),
+            rights: Rights::ALL,
+        };
+        let text = object(3, &entry);
+        assert!(text.contains(r#""object":"channel","handle":3"#));
+        assert!(text.contains(r#""pending":1,"peer_closed":true"#));
+        assert!(text.contains(r#""name":"channel_recv","allowed":true"#));
     }
 }

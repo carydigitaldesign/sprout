@@ -1,6 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["kernel", "lib/sprout-abi", "lib/sprout-rt", "user/init", "tools/xtask"]
+members = [
+    "kernel",
+    "lib/sprout-abi",
+    "lib/sprout-rt",
+    "lib/sprout-virtio",
+    "user/init",
+    "user/shell",
+    "user/fsd",
+    "user/blkd",
+    "tools/xtask",
+]
 # A bare `cargo build` builds only the host tooling. The kernel is a
 # cross-compiled no_std binary and is built through `cargo xtask build`.
 default-members = ["tools/xtask"]

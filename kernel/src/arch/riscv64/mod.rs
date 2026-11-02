@@ -43,6 +43,21 @@ pub fn init_devices() {
     uart::init();
 }
 
+/// Routes an external interrupt source to `handler`.
+pub fn irq_register(irq: u32, handler: fn(u32)) {
+    plic::enable(irq, 1, handler);
+}
+
+/// Stops `irq` from interrupting until [`irq_unmask`].
+pub fn irq_mask(irq: u32) {
+    plic::set_source_enabled(irq, false);
+}
+
+/// Lets `irq` interrupt again.
+pub fn irq_unmask(irq: u32) {
+    plic::set_source_enabled(irq, true);
+}
+
 /// The platform timer counter. Its rate comes from the device tree.
 pub fn timer_cycles() -> u64 {
     csr::time::read() as u64

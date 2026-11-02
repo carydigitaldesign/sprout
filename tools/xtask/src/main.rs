@@ -138,14 +138,19 @@ fn kernel_path(opts: &BuildOptions) -> PathBuf {
 }
 
 /// User programs, built before the kernel so it can embed them.
-const USER_PROGRAMS: &[&str] = &["init"];
+const USER_PROGRAMS: &[&str] = &["init", "shell", "fsd", "blkd"];
 
-/// Builds the user programs into `target/user` and returns the path of
-/// `init`, which the kernel's build script embeds.
+/// Builds the user programs into `target/user`, packs them into an
+/// initramfs (newc cpio) and returns the archive's path for the kernel
+/// build script to embed.
 fn build_user(release: bool) -> Result<PathBuf, String> {
     let dir = root().join("target").join("user");
     let mut cmd = Command::new(cargo());
+    // The kernel embeds these ELFs whole and copies them when spawning;
+    // debug info would triple their size for nothing the loader uses.
     cmd.current_dir(root())
+        .env("CARGO_PROFILE_DEV_STRIP", "debuginfo")
+        .env("CARGO_PROFILE_RELEASE_STRIP", "debuginfo")
         .arg("build")
         .arg("--target")
         .arg(TARGET);
@@ -163,20 +168,79 @@ fn build_user(release: bool) -> Result<PathBuf, String> {
         return Err("user program build failed".to_string());
     }
     let profile = if release { "release" } else { "debug" };
-    Ok(dir.join(TARGET).join(profile).join("init"))
+    let out = dir.join(TARGET).join(profile);
+    let mut files = Vec::new();
+    for program in USER_PROGRAMS {
+        let bytes = fs::read(out.join(program))
+            .map_err(|e| format!("could not read built program {program}: {e}"))?;
+        files.push((program.to_string(), bytes));
+    }
+    let archive = out.join("initramfs.cpio");
+    fs::write(&archive, cpio_newc(&files))
+        .map_err(|e| format!("could not write initramfs: {e}"))?;
+    Ok(archive)
+}
+
+/// Packs files into a `newc` cpio archive, the initramfs format the kernel
+/// and `sprout-abi::cpio` read.
+fn cpio_newc(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    fn entry(out: &mut Vec<u8>, ino: usize, name: &str, data: &[u8]) {
+        let mode = if name == "TRAILER!!!" { 0 } else { 0o100644 };
+        let header = format!(
+            "070701{ino:08x}{mode:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
+            0,
+            0,
+            1,
+            0,
+            data.len(),
+            0,
+            0,
+            0,
+            0,
+            name.len() + 1,
+            0
+        );
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.push(0);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out.extend_from_slice(data);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+    }
+    let mut out = Vec::new();
+    for (i, (name, data)) in files.iter().enumerate() {
+        entry(&mut out, i + 1, name, data);
+    }
+    entry(&mut out, 0, "TRAILER!!!", &[]);
+    out
+}
+
+/// The disk image `blkd` drives: 1 MiB, sector 0 carrying a magic string.
+/// Created on first use; writes by the guest persist across runs.
+fn disk_image() -> Result<PathBuf, String> {
+    let path = root().join("target").join("disk.img");
+    if !path.exists() {
+        let mut image = vec![0u8; 1 << 20];
+        image[..15].copy_from_slice(
+            b"SPROUT-DISK v1
+",
+        );
+        fs::write(&path, image).map_err(|e| format!("could not create disk image: {e}"))?;
+    }
+    Ok(path)
 }
 
 /// Cross-compiles the user programs, then the kernel; returns the kernel ELF.
 fn build(opts: &BuildOptions) -> Result<PathBuf, String> {
-    let init = build_user(opts.release)?;
+    let initramfs = build_user(opts.release)?;
     let mut cmd = Command::new(cargo());
-    cmd.current_dir(root()).env("SPROUT_INIT_ELF", &init).args([
-        "build",
-        "--package",
-        KERNEL_PACKAGE,
-        "--target",
-        TARGET,
-    ]);
+    cmd.current_dir(root())
+        .env("SPROUT_INITRAMFS", &initramfs)
+        .args(["build", "--package", KERNEL_PACKAGE, "--target", TARGET]);
     if opts.ktest {
         cmd.args(["--features", "ktest"]);
         cmd.arg("--target-dir").arg(target_dir(opts));
@@ -346,12 +410,24 @@ fn qemu_argv(kernel: &Path, gdb: bool) -> Vec<String> {
             "-monitor",
             "none",
             "-no-reboot",
+            // Modern virtio-mmio (version 2), which sprout-virtio speaks.
+            "-global",
+            "virtio-mmio.force-legacy=false",
             "-kernel",
         ]
         .iter()
         .map(|s| s.to_string()),
     );
     argv.push(kernel.display().to_string());
+    if let Ok(disk) = disk_image() {
+        argv.push("-drive".to_string());
+        argv.push(format!(
+            "file={},if=none,format=raw,id=disk0",
+            disk.display()
+        ));
+        argv.push("-device".to_string());
+        argv.push("virtio-blk-device,drive=disk0".to_string());
+    }
     if gdb {
         // Halt at reset with a gdbstub on localhost:1234.
         argv.extend(["-s", "-S"].iter().map(|s| s.to_string()));

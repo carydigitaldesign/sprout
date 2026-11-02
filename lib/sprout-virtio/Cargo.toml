@@ -1,0 +1,13 @@
+[package]
+name = "sprout-virtio"
+description = "Userspace virtio: the modern virtio-mmio transport, a split virtqueue, and the block device protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+bench = false
+
+[dependencies]

@@ -7,9 +7,14 @@
 
 #![no_std]
 
+pub use sprout_abi::cpio;
+
 use core::fmt::Write;
 
-pub use sprout_abi::{self as abi, Error, HANDLE_KERNEL, HANDLE_SELF_PROCESS, Handle, Rights};
+pub use sprout_abi::{
+    self as abi, CHANNEL_MAX_BYTES, CHANNEL_MAX_HANDLES, Error, HANDLE_BOOTSTRAP, HANDLE_KERNEL,
+    HANDLE_SELF_PROCESS, Handle, Message, PortPacket, Rights, TIMEOUT_INFINITE, signals, vmo_flags,
+};
 
 core::arch::global_asm!(
     r#"
@@ -104,8 +109,52 @@ pub fn handle_close(handle: Handle) -> Result<(), Error> {
     call(abi::sys::HANDLE_CLOSE, [handle as usize, 0, 0, 0, 0, 0]).map(|_| ())
 }
 
+/// A second handle to the same object, with at most `rights`.
+pub fn handle_duplicate(handle: Handle, rights: Rights) -> Result<Handle, Error> {
+    call(
+        abi::sys::HANDLE_DUPLICATE,
+        [handle as usize, rights.0 as usize, 0, 0, 0, 0],
+    )
+    .map(|h| h as Handle)
+}
+
 pub fn vmo_create(size: usize) -> Result<Handle, Error> {
     call(abi::sys::VMO_CREATE, [size, 0, 0, 0, 0, 0]).map(|h| h as Handle)
+}
+
+/// A VMO whose pages are physically contiguous, for device buffers.
+pub fn vmo_create_contiguous(size: usize) -> Result<Handle, Error> {
+    call(
+        abi::sys::VMO_CREATE,
+        [size, vmo_flags::CONTIGUOUS, 0, 0, 0, 0],
+    )
+    .map(|h| h as Handle)
+}
+
+/// Physical address of a byte in a contiguous VMO, to give to a device.
+pub fn vmo_physical(handle: Handle, offset: usize) -> Result<usize, Error> {
+    call(
+        abi::sys::VMO_PHYSICAL,
+        [handle as usize, offset, 0, 0, 0, 0],
+    )
+}
+
+/// Maps a device's registers and returns their address.
+pub fn device_map(device: Handle) -> Result<usize, Error> {
+    call(abi::sys::DEVICE_MAP, [device as usize, 0, 0, 0, 0, 0])
+}
+
+/// Waits for the device's interrupt; returns how many fired.
+pub fn device_irq_wait(device: Handle, timeout_ms: u64) -> Result<usize, Error> {
+    call(
+        abi::sys::DEVICE_IRQ_WAIT,
+        [device as usize, timeout_ms as usize, 0, 0, 0, 0],
+    )
+}
+
+/// Unmasks the device's interrupt line after handling one.
+pub fn device_irq_ack(device: Handle) -> Result<(), Error> {
+    call(abi::sys::DEVICE_IRQ_ACK, [device as usize, 0, 0, 0, 0, 0]).map(|_| ())
 }
 
 pub fn vmo_read(handle: Handle, offset: usize, buf: &mut [u8]) -> Result<(), Error> {
@@ -136,6 +185,132 @@ pub fn vmo_write(handle: Handle, offset: usize, buf: &[u8]) -> Result<(), Error>
         ],
     )
     .map(|_| ())
+}
+
+/// Size of a VMO in bytes, read from its description.
+pub fn vmo_size(handle: Handle) -> Result<usize, Error> {
+    let mut buf = [0u8; 256];
+    let n = describe(handle, &mut buf)?.min(buf.len());
+    let text = core::str::from_utf8(&buf[..n]).map_err(|_| Error::WrongType)?;
+    let at = text.find("\"size\":").ok_or(Error::WrongType)? + 7;
+    let digits: usize = text[at..].bytes().take_while(u8::is_ascii_digit).count();
+    text[at..at + digits].parse().map_err(|_| Error::WrongType)
+}
+
+/// Maps the whole VMO and returns its address.
+pub fn vmo_map(handle: Handle) -> Result<usize, Error> {
+    call(abi::sys::VMO_MAP, [handle as usize, 0, 0, 0, 0, 0])
+}
+
+pub fn vmo_unmap(addr: usize) -> Result<(), Error> {
+    call(abi::sys::VMO_UNMAP, [addr, 0, 0, 0, 0, 0]).map(|_| ())
+}
+
+/// A channel: two endpoints, each with all rights.
+pub fn channel_create() -> Result<(Handle, Handle), Error> {
+    let mut out = [0 as Handle; 2];
+    call(
+        abi::sys::CHANNEL_CREATE,
+        [out.as_mut_ptr() as usize, 0, 0, 0, 0, 0],
+    )?;
+    Ok((out[0], out[1]))
+}
+
+/// Sends bytes and handles. The handles leave this process.
+pub fn channel_send(handle: Handle, bytes: &[u8], handles: &[Handle]) -> Result<(), Error> {
+    let msg = Message {
+        bytes: bytes.as_ptr() as *mut u8,
+        bytes_cap: bytes.len(),
+        bytes_len: bytes.len(),
+        handles: handles.as_ptr() as *mut Handle,
+        handles_cap: handles.len(),
+        handles_len: handles.len(),
+    };
+    call(
+        abi::sys::CHANNEL_SEND,
+        [handle as usize, &msg as *const Message as usize, 0, 0, 0, 0],
+    )
+    .map(|_| ())
+}
+
+/// Receives the oldest message into `bytes` and `handles`; returns how
+/// much of each arrived.
+pub fn channel_recv(
+    handle: Handle,
+    bytes: &mut [u8],
+    handles: &mut [Handle],
+    timeout_ms: u64,
+) -> Result<(usize, usize), Error> {
+    let mut msg = Message {
+        bytes: bytes.as_mut_ptr(),
+        bytes_cap: bytes.len(),
+        bytes_len: 0,
+        handles: handles.as_mut_ptr(),
+        handles_cap: handles.len(),
+        handles_len: 0,
+    };
+    call(
+        abi::sys::CHANNEL_RECV,
+        [
+            handle as usize,
+            &mut msg as *mut Message as usize,
+            timeout_ms as usize,
+            0,
+            0,
+            0,
+        ],
+    )?;
+    Ok((msg.bytes_len, msg.handles_len))
+}
+
+pub fn port_create() -> Result<Handle, Error> {
+    call(abi::sys::PORT_CREATE, [0; 6]).map(|h| h as Handle)
+}
+
+pub fn port_attach(port: Handle, object: Handle, key: u64) -> Result<(), Error> {
+    call(
+        abi::sys::PORT_ATTACH,
+        [port as usize, object as usize, key as usize, 0, 0, 0],
+    )
+    .map(|_| ())
+}
+
+pub fn port_wait(port: Handle, timeout_ms: u64) -> Result<PortPacket, Error> {
+    let mut packet = PortPacket::default();
+    call(
+        abi::sys::PORT_WAIT,
+        [
+            port as usize,
+            &mut packet as *mut PortPacket as usize,
+            timeout_ms as usize,
+            0,
+            0,
+            0,
+        ],
+    )?;
+    Ok(packet)
+}
+
+/// Starts a process from the ELF in `image`; `bootstrap` (or 0) moves into
+/// it as [`HANDLE_BOOTSTRAP`].
+pub fn process_spawn(image: Handle, bootstrap: Handle, name: &str) -> Result<Handle, Error> {
+    call(
+        abi::sys::PROCESS_SPAWN,
+        [
+            image as usize,
+            bootstrap as usize,
+            name.as_ptr() as usize,
+            name.len(),
+            0,
+            0,
+        ],
+    )
+    .map(|h| h as Handle)
+}
+
+/// Waits for a process to exit and returns its code.
+pub fn process_wait(process: Handle) -> Result<i32, Error> {
+    call(abi::sys::PROCESS_WAIT, [process as usize, 0, 0, 0, 0, 0]).map(|c| c as i32)
 }
 
 /// A fixed buffer that implements `fmt::Write`, for formatting without a heap.

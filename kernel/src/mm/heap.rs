@@ -14,8 +14,8 @@ use crate::arch::{PAGE_SIZE, phys_to_virt};
 use crate::mm::frame;
 use crate::sync::SpinLock;
 
-/// 1 MiB. Plenty until userspace exists.
-pub const DEFAULT_FRAMES: usize = 256;
+/// 4 MiB: process images are copied through the heap when spawning.
+pub const DEFAULT_FRAMES: usize = 1024;
 
 struct KernelHeap(SpinLock<Heap>);
 

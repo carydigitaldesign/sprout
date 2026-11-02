@@ -1,8 +1,8 @@
 //! Virtual memory objects: a sized bag of physical pages (PLAN.md 2.1).
 //!
-//! At M2 a `Vmo` is a plain struct the kernel uses directly. M4 wraps it in
-//! a kernel object reachable through a handle, and M5 maps it into address
-//! spaces; its pages are already addressable for that through [`Vmo::frame`].
+//! A `Vmo` is what processes map, read, write and hand to each other. A
+//! contiguous one is for device buffers: its physical address is stable
+//! and knowable (`physical`).
 
 use alloc::vec::Vec;
 
@@ -18,13 +18,40 @@ pub enum VmoError {
 /// Zero-filled pages, allocated up front.
 pub struct Vmo {
     frames: Vec<Frame>,
+    contiguous: bool,
 }
 
 impl Vmo {
     /// A VMO of at least `size` bytes, rounded up to whole pages.
     pub fn new(size: usize) -> Result<Vmo, VmoError> {
-        let mut vmo = Vmo { frames: Vec::new() };
+        let mut vmo = Vmo {
+            frames: Vec::new(),
+            contiguous: false,
+        };
         vmo.resize(size)?;
+        Ok(vmo)
+    }
+
+    /// A VMO whose pages are physically contiguous.
+    pub fn new_contiguous(size: usize) -> Result<Vmo, VmoError> {
+        let pages = size.div_ceil(PAGE_SIZE).max(1);
+        let first = frame::alloc_contiguous(pages).ok_or(VmoError::OutOfMemory)?;
+        let frames: Vec<Frame> = (0..pages)
+            .map(|i| Frame::from_pa(first.pa() + i * PAGE_SIZE))
+            .collect();
+        for f in &frames {
+            f.as_bytes_mut().fill(0);
+        }
+        Ok(Vmo {
+            frames,
+            contiguous: true,
+        })
+    }
+
+    /// A VMO holding a copy of `bytes`, zero-padded to whole pages.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Vmo, VmoError> {
+        let mut vmo = Vmo::new(bytes.len().max(1))?;
+        vmo.write(0, bytes)?;
         Ok(vmo)
     }
 
@@ -33,13 +60,25 @@ impl Vmo {
         self.frames.len() * PAGE_SIZE
     }
 
-    /// The frame backing page `index`. Used from M5 when VMOs are mapped.
-    #[allow(dead_code)]
+    /// The frame backing page `index`.
     pub fn frame(&self, index: usize) -> Option<Frame> {
         self.frames.get(index).copied()
     }
 
-    /// Grows with zeroed pages or shrinks by freeing the tail.
+    pub fn is_contiguous(&self) -> bool {
+        self.contiguous
+    }
+
+    /// Physical address of the byte at `offset`, for contiguous VMOs only.
+    pub fn physical(&self, offset: usize) -> Option<usize> {
+        if !self.contiguous || offset >= self.size() {
+            return None;
+        }
+        Some(self.frames[0].pa() + offset)
+    }
+
+    /// Grows with zeroed pages or shrinks by freeing the tail. A contiguous
+    /// VMO cannot grow.
     pub fn resize(&mut self, size: usize) -> Result<(), VmoError> {
         let want = size.div_ceil(PAGE_SIZE);
         if want < self.frames.len() {
@@ -47,6 +86,9 @@ impl Vmo {
                 frame::free(f);
             }
             return Ok(());
+        }
+        if self.contiguous && want > self.frames.len() {
+            return Err(VmoError::OutOfMemory);
         }
         let extra = want - self.frames.len();
         if self.frames.try_reserve(extra).is_err() {
@@ -132,6 +174,7 @@ crate::ktest! {
             vmo.read(0, &mut untouched).expect("read");
             assert_eq!(untouched, [0u8; 16], "new pages are zeroed");
             assert_eq!(frame::stats().free, free_before - 3);
+            assert_eq!(vmo.physical(0), None, "not contiguous");
         }
         assert_eq!(frame::stats().free, free_before, "drop returns the frames");
     }
@@ -155,5 +198,22 @@ crate::ktest! {
         assert_eq!(vmo.read(PAGE_SIZE - 2, &mut kept), Err(VmoError::OutOfRange));
         assert_eq!(vmo.write(usize::MAX, b"x"), Err(VmoError::OutOfRange));
         assert_eq!(frame::stats().free, free_before - 1);
+    }
+}
+
+crate::ktest! {
+    fn contiguous_vmo_has_a_physical_address() {
+        let free_before = frame::stats().free;
+        {
+            let vmo = Vmo::new_contiguous(3 * PAGE_SIZE).expect("vmo");
+            let base = vmo.physical(0).expect("physical");
+            assert_eq!(vmo.physical(2 * PAGE_SIZE + 5), Some(base + 2 * PAGE_SIZE + 5));
+            assert_eq!(vmo.physical(3 * PAGE_SIZE), None);
+            assert_eq!(vmo.frame(1).expect("frame").pa(), base + PAGE_SIZE);
+            let mut zeros = [1u8; 8];
+            vmo.read(PAGE_SIZE, &mut zeros).expect("read");
+            assert_eq!(zeros, [0u8; 8]);
+        }
+        assert_eq!(frame::stats().free, free_before);
     }
 }

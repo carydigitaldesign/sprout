@@ -1,13 +1,16 @@
 //! Syscall dispatch: the kernel's entire interface to userspace. The table
-//! in `sprout-abi` is the spec; this file is the implementation, and
+//! in `sprout-abi` is the spec; these files are the implementation, and
 //! [`describe`] renders the spec so userspace can read it at runtime.
 
 pub mod describe;
-mod user;
+mod device;
+mod ipc;
+mod process;
+pub mod user;
 
 use alloc::sync::Arc;
 
-use sprout_abi::{Error, Handle, Rights, sys};
+use sprout_abi::{Error, Handle, Rights, TIMEOUT_INFINITE, sys, vmo_flags};
 
 use crate::mm::vmo::Vmo;
 use crate::obj::handle::Entry;
@@ -45,9 +48,39 @@ pub fn dispatch(num: usize, args: [usize; 6]) -> isize {
         }
         sys::DESCRIBE => sys_describe(&process, args[0] as Handle, args[1], args[2]),
         sys::HANDLE_CLOSE => process.handles.lock().remove(args[0] as Handle).map(|_| 0),
-        sys::VMO_CREATE => sys_vmo_create(&process, args[0]),
+        sys::HANDLE_DUPLICATE => {
+            sys_handle_duplicate(&process, args[0] as Handle, Rights(args[1] as u32))
+        }
+        sys::VMO_CREATE => sys_vmo_create(&process, args[0], args[1]),
         sys::VMO_READ => sys_vmo_rw(&process, args, false),
         sys::VMO_WRITE => sys_vmo_rw(&process, args, true),
+        sys::CHANNEL_CREATE => ipc::channel_create(&process, args[0]),
+        sys::CHANNEL_SEND => ipc::channel_send(&process, args[0] as Handle, args[1]),
+        sys::CHANNEL_RECV => {
+            ipc::channel_recv(&process, args[0] as Handle, args[1], args[2] as u64)
+        }
+        sys::PORT_CREATE => ipc::port_create(&process),
+        sys::PORT_ATTACH => ipc::port_attach(
+            &process,
+            args[0] as Handle,
+            args[1] as Handle,
+            args[2] as u64,
+        ),
+        sys::PORT_WAIT => ipc::port_wait(&process, args[0] as Handle, args[1], args[2] as u64),
+        sys::PROCESS_SPAWN => process::spawn(
+            &process,
+            args[0] as Handle,
+            args[1] as Handle,
+            args[2],
+            args[3],
+        ),
+        sys::PROCESS_WAIT => process::wait(&process, args[0] as Handle),
+        sys::VMO_MAP => process::vmo_map(&process, args[0] as Handle),
+        sys::VMO_UNMAP => process.unmap(args[0]).map(|_| 0),
+        sys::DEVICE_MAP => device::map(&process, args[0] as Handle),
+        sys::DEVICE_IRQ_WAIT => device::irq_wait(&process, args[0] as Handle, args[1] as u64),
+        sys::DEVICE_IRQ_ACK => device::irq_ack(&process, args[0] as Handle),
+        sys::VMO_PHYSICAL => device::vmo_physical(&process, args[0] as Handle, args[1]),
         _ => Err(Error::NoSuchSyscall),
     };
     match result {
@@ -85,6 +118,18 @@ fn lookup(process: &Process, handle: Handle, needs: Rights) -> Result<Entry, Err
     Ok(entry)
 }
 
+/// Converts a syscall timeout into a tick deadline.
+fn deadline(timeout_ms: u64) -> Option<u64> {
+    if timeout_ms == TIMEOUT_INFINITE {
+        None
+    } else if timeout_ms == 0 {
+        Some(time::ticks())
+    } else {
+        // One extra tick: the current tick is already partly spent.
+        Some(time::ticks() + time::ms_to_ticks(timeout_ms) + 1)
+    }
+}
+
 fn sys_log(process: &Process, ptr: usize, len: usize) -> Result<usize, Error> {
     if len > MAX_LOG_BYTES {
         return Err(Error::InvalidArgument);
@@ -109,11 +154,22 @@ fn sys_describe(process: &Process, handle: Handle, buf: usize, len: usize) -> Re
     Ok(bytes.len())
 }
 
-fn sys_vmo_create(process: &Process, size: usize) -> Result<usize, Error> {
-    if size == 0 || size > MAX_VMO_BYTES {
+fn sys_handle_duplicate(process: &Process, handle: Handle, mask: Rights) -> Result<usize, Error> {
+    let entry = lookup(process, handle, Rights::DUPLICATE)?;
+    let rights = entry.rights.intersection(mask);
+    Ok(process.handles.lock().insert(entry.object, rights) as usize)
+}
+
+fn sys_vmo_create(process: &Process, size: usize, flags: usize) -> Result<usize, Error> {
+    if size == 0 || size > MAX_VMO_BYTES || flags & !vmo_flags::CONTIGUOUS != 0 {
         return Err(Error::InvalidArgument);
     }
-    let vmo = Vmo::new(size).map_err(|_| Error::OutOfMemory)?;
+    let vmo = if flags & vmo_flags::CONTIGUOUS != 0 {
+        Vmo::new_contiguous(size)
+    } else {
+        Vmo::new(size)
+    }
+    .map_err(|_| Error::OutOfMemory)?;
     let handle = process
         .handles
         .lock()

@@ -12,6 +12,7 @@ mod arch;
 // Console input is only consumed by tests until a shell exists (M5).
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 mod console;
+mod devices;
 mod elf;
 mod fdt;
 // The JSON writer is a complete little API; not every method has a caller yet.
@@ -58,6 +59,7 @@ pub extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     time::init(mm::boot_info().timebase_hz);
     arch::init_devices();
     sched::init();
+    devices::init();
     arch::interrupts::enable();
     log::info("boot", "timer and scheduler running")
         .num("tick_hz", time::TICK_HZ)
@@ -72,8 +74,7 @@ pub extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
 
     #[cfg(not(feature = "ktest"))]
     {
-        let init = obj::process::spawn("init", user_image::INIT_ELF)
-            .unwrap_or_else(|e| panic!("cannot start init: {e}"));
+        let init = obj::process::spawn_init().unwrap_or_else(|e| panic!("cannot start init: {e}"));
         let code = init.wait();
         log::event("init_exited").num("code", code).end();
 

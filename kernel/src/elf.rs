@@ -152,7 +152,8 @@ impl<'a> Elf<'a> {
 
 crate::ktest! {
     fn parses_the_embedded_init_program() {
-        let elf = Elf::parse(crate::user_image::INIT_ELF).expect("init is a valid ELF");
+        let image = sprout_abi::cpio::find(crate::user_image::INITRAMFS, "init").expect("init in initramfs");
+        let elf = Elf::parse(image).expect("init is a valid ELF");
         assert_eq!(elf.entry(), sprout_abi::USER_IMAGE_BASE, "_start is linked first");
         let segments: alloc::vec::Vec<Segment> = elf.segments().map(|s| s.expect("segment")).collect();
         assert!(!segments.is_empty());

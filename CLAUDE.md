@@ -90,6 +90,21 @@ over running these by hand; they return structured results.
   build` builds them first; the kernel embeds `init`.
 - A user fault kills the process (exit code 128 + cause) and logs a
   `user_fault` event; a kernel fault is still a panic.
+- Handle numbers are reused as soon as a slot is closed or transferred.
+  Never reason about a number you no longer hold; `describe` it if in doubt.
+- Processes talk over channels (`channel_send`/`channel_recv`, handles
+  included) and wait on several with a port. New programs are spawned from
+  a VMO holding their ELF with a channel as the bootstrap handle.
+- Programs live in the initramfs (`cargo xtask build` packs `user/` into a
+  cpio; add a crate name to `USER_PROGRAMS` in xtask and `PROGRAMS` in the
+  kernel's `user_image` test). `init` gets the archive plus a handle per
+  discovered device; `fsd` serves files from it.
+- Drivers are user programs holding a `Device` handle: `device_map` for the
+  registers, `device_irq_wait` / `device_irq_ack` for the line (the kernel
+  masks it until the ack), `vmo_create` with `CONTIGUOUS` plus
+  `vmo_physical` for DMA memory. `lib/sprout-virtio` has the transport.
+- QEMU runs with `virtio-mmio.force-legacy=false` and a `virtio-blk-device`
+  backed by `target/disk.img`; writes persist, delete the file to reset.
 
 ## Layout
 

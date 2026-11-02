@@ -1,0 +1,17 @@
+[package]
+name = "blkd"
+description = "A virtio-blk driver in userspace: reads and writes sectors through a device handle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "blkd"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+sprout-rt = { path = "../../lib/sprout-rt" }
+sprout-virtio = { path = "../../lib/sprout-virtio" }
