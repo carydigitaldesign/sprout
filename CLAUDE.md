@@ -53,6 +53,9 @@ over running these by hand; they return structured results.
 - Every change must boot and pass `cargo xtask test` before it is done.
 - Every `unsafe` block carries a `// SAFETY:` comment stating the invariant.
 - Architecture-specific code lives only under `kernel/src/arch/<arch>/`.
+- The kernel runs in the higher half. Reach physical memory through
+  `arch::phys_to_virt`; frames come from `mm::frame` and go back there.
+  Every allocator test checks the free count before and after.
 - Anything that can be a userspace program is a userspace program.
 - New kernel dependency, new syscall, new object type, or budget change: write
   an ADR in `docs/adr/` in the same change.

@@ -52,3 +52,8 @@ csr!(
     sstatus,
     "sstatus"
 );
+csr!(
+    /// Supervisor address translation: paging mode and root table.
+    satp,
+    "satp"
+);

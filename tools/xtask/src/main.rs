@@ -479,6 +479,8 @@ const LOC_TARGETS: &[(&str, usize)] = &[
     ("syscall", 1_000),
     ("elf", 500),
     ("log", 250),
+    ("fdt", 300),
+    ("sync", 200),
     ("testing", 250),
     ("panic", 100),
 ];
@@ -554,7 +556,7 @@ fn loc() -> u8 {
 // ------------------------------------------------------------------- lint
 
 /// Every `unsafe {` block and `unsafe impl` must have a `// SAFETY:` comment
-/// on the same line or within the four lines above it.
+/// on the same line or in the comment block directly above it.
 fn lint() -> u8 {
     let mut files = Vec::new();
     rust_files(&root().join("kernel"), &mut files);
@@ -576,8 +578,27 @@ fn lint() -> u8 {
             if !needs_comment {
                 continue;
             }
-            let window = &lines[i.saturating_sub(4)..=i];
-            if !window.iter().any(|l| l.contains("SAFETY:")) {
+            // The comment may be on the same line, on an earlier line of the
+            // same statement, or in the block of `//` lines directly above
+            // the statement, however long that block is.
+            let mut documented = line.contains("SAFETY:");
+            let mut j = i;
+            while !documented && j > 0 {
+                j -= 1;
+                let above = lines[j].trim();
+                if above.starts_with("//") {
+                    documented = above.contains("SAFETY:");
+                    continue;
+                }
+                if above.is_empty()
+                    || above.ends_with(';')
+                    || above.ends_with('{')
+                    || above.ends_with('}')
+                {
+                    break;
+                }
+            }
+            if !documented {
                 problems += 1;
                 let rel = file.strip_prefix(root()).unwrap_or(file);
                 println!(

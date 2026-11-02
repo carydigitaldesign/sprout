@@ -16,5 +16,7 @@ bench = false
 # Build the test kernel: runs every `ktest!` and exits QEMU with the result.
 ktest = []
 
-# Kernel dependencies need an ADR (ADR-0001). None yet.
+# Kernel dependencies need an ADR (ADR-0001).
 [dependencies]
+# Kernel heap (ADR-0006). Locking is ours, so no default features.
+linked_list_allocator = { version = "0.10", default-features = false }

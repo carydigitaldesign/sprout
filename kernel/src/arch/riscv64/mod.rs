@@ -6,11 +6,16 @@ mod boot;
 #[allow(dead_code)]
 mod csr;
 mod exit;
+// The full page-table API is exercised by tests; the kernel itself only
+// needs all of it once address spaces are built and torn down (M4, M5).
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+mod paging;
 mod sbi;
 mod trap;
 
 pub use backtrace::{frame_pointer, frames_from as stack_frames};
 pub use exit::exit;
+pub use paging::{PAGE_SIZE, PageTable, phys_to_virt, virt_to_phys};
 
 /// Architecture name for logs.
 pub const NAME: &str = "riscv64";
