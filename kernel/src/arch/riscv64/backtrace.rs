@@ -7,13 +7,40 @@
 //! maintain `s0`, but as a callee-saved register it passes through those
 //! functions untouched, so the chain skips them rather than breaking.
 //!
+//! Frames are validated against the running thread's stack, which the
+//! scheduler announces with [`set_current_stack`] on every switch.
 //! Addresses are raw; `cargo xtask symbolize` turns them into names.
+
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 unsafe extern "C" {
     static __stack_bottom: u8;
     static __stack_top: u8;
     static __kernel_start: u8;
     static __kernel_end: u8;
+}
+
+static STACK_BOTTOM: AtomicUsize = AtomicUsize::new(0);
+static STACK_TOP: AtomicUsize = AtomicUsize::new(0);
+
+/// The boot hart's stack from the linker script: `(bottom, top)`.
+pub fn boot_stack() -> (usize, usize) {
+    (
+        core::ptr::addr_of!(__stack_bottom) as usize,
+        core::ptr::addr_of!(__stack_top) as usize,
+    )
+}
+
+/// Tells the walker which stack the current thread runs on.
+pub fn set_current_stack(bottom: usize, top: usize) {
+    STACK_BOTTOM.store(bottom, Ordering::Relaxed);
+    STACK_TOP.store(top, Ordering::Relaxed);
+}
+
+/// Starts out on the boot stack.
+pub fn init() {
+    let (bottom, top) = boot_stack();
+    set_current_stack(bottom, top);
 }
 
 /// The current function's frame pointer.
@@ -31,8 +58,8 @@ pub fn frames_from(fp: usize) -> Frames {
 }
 
 /// Iterator behind [`frames_from`]. Stops at the first frame that does not
-/// look like one: outside the boot stack, misaligned, or a return address
-/// outside the kernel image.
+/// look like one: outside the current stack, misaligned, or a return
+/// address outside the kernel image.
 pub struct Frames {
     fp: usize,
 }
@@ -41,10 +68,8 @@ impl Iterator for Frames {
     type Item = usize;
 
     fn next(&mut self) -> Option<usize> {
-        // M3 note: when threads get their own stacks these bounds must come
-        // from the current thread, not the boot stack.
-        let stack_bottom = core::ptr::addr_of!(__stack_bottom) as usize;
-        let stack_top = core::ptr::addr_of!(__stack_top) as usize;
+        let stack_bottom = STACK_BOTTOM.load(Ordering::Relaxed);
+        let stack_top = STACK_TOP.load(Ordering::Relaxed);
         let kernel_start = core::ptr::addr_of!(__kernel_start) as usize;
         let kernel_end = core::ptr::addr_of!(__kernel_end) as usize;
 
@@ -52,9 +77,9 @@ impl Iterator for Frames {
         if fp < stack_bottom + 16 || fp > stack_top || fp % 16 != 0 {
             return None;
         }
-        // SAFETY: `fp` lies inside the boot stack with room for two words
-        // below it (checked above), so both reads are of mapped, initialised
-        // kernel stack memory.
+        // SAFETY: `fp` lies inside the current stack with room for two
+        // words below it (checked above), so both reads are of mapped,
+        // initialised stack memory.
         let (ra, caller_fp) = unsafe {
             (
                 core::ptr::read((fp - 8) as *const usize),
@@ -65,8 +90,8 @@ impl Iterator for Frames {
             return None;
         }
         // Stacks grow down, so a genuine caller frame is above ours. Zero
-        // is the sentinel the boot code puts in `s0`; it fails the bounds
-        // check on the next call and ends the walk.
+        // is the sentinel the boot code and new threads put in `s0`; it
+        // fails the bounds check on the next call and ends the walk.
         if caller_fp != 0 && caller_fp <= fp {
             return None;
         }

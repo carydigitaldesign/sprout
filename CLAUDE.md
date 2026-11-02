@@ -56,6 +56,13 @@ over running these by hand; they return structured results.
 - The kernel runs in the higher half. Reach physical memory through
   `arch::phys_to_virt`; frames come from `mm::frame` and go back there.
   Every allocator test checks the free count before and after.
+- Interrupts are on from `kmain` onwards. `SpinLock` masks them while held,
+  so it is safe from interrupt handlers; never hold one across
+  `sched::yield_now`, `sleep` or a wait. A log `Line` holds the console
+  lock until `.end()`, so keep lines short and never log mid-lock-dance.
+- Kernel threads: `sched::spawn(name, fn, arg)`, `yield_now`, `join`,
+  `time::sleep_ms`, `sched::wait::WaitQueue`. Preemption is on; shared state
+  needs atomics or a lock.
 - Anything that can be a userspace program is a userspace program.
 - New kernel dependency, new syscall, new object type, or budget change: write
   an ADR in `docs/adr/` in the same change.

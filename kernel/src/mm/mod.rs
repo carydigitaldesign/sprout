@@ -113,6 +113,8 @@ static KERNEL_TABLE: SpinLock<Option<PageTable>> = SpinLock::new(None);
 pub struct BootInfo {
     pub dtb_pa: usize,
     pub ram: Region,
+    /// Rate of the platform timer counter.
+    pub timebase_hz: u64,
 }
 
 static BOOT_INFO: SpinLock<Option<BootInfo>> = SpinLock::new(None);
@@ -153,7 +155,19 @@ pub fn init(dtb_pa: usize) {
     *KERNEL_TABLE.lock() = Some(table);
 
     heap::init(heap::DEFAULT_FRAMES);
-    *BOOT_INFO.lock() = Some(BootInfo { dtb_pa, ram });
+    let timebase_hz = fdt.timebase_frequency().unwrap_or_else(|| {
+        log::warn(
+            "mm",
+            "device tree has no timebase-frequency; assuming 10 MHz",
+        )
+        .end();
+        10_000_000
+    });
+    *BOOT_INFO.lock() = Some(BootInfo {
+        dtb_pa,
+        ram,
+        timebase_hz,
+    });
 
     let stats = frame::stats();
     log::info("mm", "memory management ready")
@@ -266,6 +280,7 @@ crate::ktest! {
         assert_eq!(info.ram.base, 0x8000_0000);
         assert_eq!(info.ram.size, 128 << 20, "xtask boots QEMU with -m 128M");
         assert!(info.dtb_pa > info.ram.base && info.dtb_pa < info.ram.base + info.ram.size);
+        assert_eq!(info.timebase_hz, 10_000_000, "QEMU virt's timer runs at 10 MHz");
     }
 }
 

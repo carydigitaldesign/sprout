@@ -57,3 +57,13 @@ csr!(
     satp,
     "satp"
 );
+csr!(
+    /// Supervisor interrupt enable: which sources may interrupt.
+    sie,
+    "sie"
+);
+csr!(
+    /// The platform timer counter (`rdtime`), read-only.
+    time,
+    "time"
+);

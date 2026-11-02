@@ -15,11 +15,20 @@ static PANICKING: AtomicBool = AtomicBool::new(false);
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // Nothing may preempt the report, and nothing else will run again.
+    arch::interrupts::disable();
+
     // A panic while reporting a panic (console broken, bad frame pointer)
     // would recurse forever. Stop instead; the first line already went out.
     if PANICKING.swap(true, Ordering::AcqRel) {
         arch::exit(EXIT_PANIC);
     }
+
+    // SAFETY: interrupts are off and this context never returns, so if the
+    // console lock is held it is held by us (a panic mid-line) and no other
+    // holder can be running.
+    unsafe { log::force_unlock_console() };
+
     let frames = arch::stack_frames(arch::frame_pointer()).take(MAX_FRAMES);
 
     #[cfg(feature = "ktest")]

@@ -9,6 +9,9 @@
 extern crate alloc;
 
 mod arch;
+// Console input is only consumed by tests until a shell exists (M5).
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+mod console;
 mod fdt;
 // The logging API is deliberately wider than any one milestone uses.
 #[allow(dead_code)]
@@ -18,8 +21,14 @@ mod log;
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 mod mm;
 mod panic;
+// Likewise for the scheduler and timer: nothing in the kernel sleeps or
+// joins until there is userspace to wait for.
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+mod sched;
 mod sync;
 mod testing;
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+mod time;
 
 /// Kernel version, from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -41,6 +50,14 @@ pub extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
         .end();
 
     mm::init(dtb);
+    time::init(mm::boot_info().timebase_hz);
+    arch::init_devices();
+    sched::init();
+    arch::interrupts::enable();
+    log::info("boot", "timer and scheduler running")
+        .num("tick_hz", time::TICK_HZ)
+        .num("threads", sched::live_threads())
+        .end();
 
     #[cfg(feature = "ktest")]
     {
@@ -50,10 +67,12 @@ pub extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
 
     #[cfg(not(feature = "ktest"))]
     {
-        log::info("boot", "Sprout is up; nothing to schedule yet").end();
-        // Nothing can wake us before M3 (no interrupt sources are enabled),
-        // so this is where `cargo xtask run` and MCP `boot` sessions sit.
-        log::event("idle").end();
-        arch::wait_forever()
+        // Nothing to schedule yet, so `main` leaves and `idle` keeps the
+        // hart in `wfi`. This is where `cargo xtask run` and MCP `boot`
+        // sessions sit; typed bytes arrive as `console_rx` events.
+        log::event("idle")
+            .num("threads", sched::live_threads())
+            .end();
+        sched::exit()
     }
 }

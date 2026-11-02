@@ -91,6 +91,8 @@ const REG_SP: usize = 2;
 const REG_FP: usize = 8;
 
 const EXC_BREAKPOINT: usize = 3;
+const INT_SUPERVISOR_TIMER: usize = 5;
+const INT_SUPERVISOR_EXTERNAL: usize = 9;
 
 static BREAKPOINTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -163,11 +165,19 @@ extern "C" fn trap_handler(frame: &mut TrapFrame) {
     let code = frame.scause & (usize::MAX >> 1);
 
     if is_interrupt {
-        log::event("trap")
-            .str("kind", "interrupt")
-            .str("cause", interrupt_name(code))
-            .num("code", code)
-            .end();
+        match code {
+            INT_SUPERVISOR_TIMER => {
+                crate::time::on_tick();
+                if crate::sched::on_tick(crate::time::ticks()) {
+                    crate::sched::yield_now();
+                }
+            }
+            INT_SUPERVISOR_EXTERNAL => super::plic::handle_external(),
+            _ => log::warn("trap", "unexpected interrupt")
+                .str("cause", interrupt_name(code))
+                .num("code", code)
+                .end(),
+        }
         return;
     }
 

@@ -164,13 +164,18 @@ def serial_read(session: str, until: str | None = None, timeout_s: float = 5.0) 
 
 @mcp.tool()
 def serial_write(session: str, text: str) -> dict:
-    """Type text into the guest console (no newline is added)."""
+    """Type text into the guest console (no newline is added). Bytes are paced in small chunks:
+    QEMU's Windows stdio backend drops input once the emulated UART FIFO reports no room, and the
+    guest can only drain it as fast as its CPU gets to run."""
     s = _session(session)
     if s.proc.stdin is None or s.proc.poll() is not None:
         return {"ok": False, "reason": "session has exited"}
-    s.proc.stdin.write(text)
-    s.proc.stdin.flush()
-    return {"ok": True}
+    chunk = 8
+    for at in range(0, len(text), chunk):
+        s.proc.stdin.write(text[at : at + chunk])
+        s.proc.stdin.flush()
+        time.sleep(0.02)
+    return {"ok": True, "bytes": len(text)}
 
 
 @mcp.tool()

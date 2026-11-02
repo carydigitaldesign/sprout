@@ -75,6 +75,10 @@ not use:
 - **Everything else just worked.** The riscv64 kernel linked on the first
   try, the SiFive test finisher is reachable from S-mode under OpenSBI, and the
   SBI v2.0 debug console is available.
+- **(M3) QEMU's Windows stdio backend drops typed input** when the emulated
+  UART reports no free FIFO space, instead of waiting as the POSIX backend
+  does. The kernel runs the FIFO at trigger level 14 and `tools/mcp-dev`
+  paces `serial_write` in 8-byte chunks, which keeps bursts intact.
 
 ## Consequences
 

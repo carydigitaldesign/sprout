@@ -162,6 +162,45 @@ impl<'a> Fdt<'a> {
     }
 }
 
+impl<'a> Fdt<'a> {
+    /// The raw value of `property` on the first top-level node called
+    /// `node` (exact name or `node@...`).
+    pub fn node_property(&self, node: &str, property: &str) -> Option<&'a [u8]> {
+        let mut depth = 0u32;
+        let mut inside = false;
+        for token in self.tokens() {
+            match token {
+                Token::BeginNode(name) => {
+                    depth += 1;
+                    inside = depth == 2
+                        && (name == node
+                            || name
+                                .strip_prefix(node)
+                                .is_some_and(|rest| rest.starts_with('@')));
+                }
+                Token::EndNode => {
+                    depth = depth.saturating_sub(1);
+                    inside = false;
+                }
+                Token::Prop { name, value } if inside && name == property => return Some(value),
+                Token::Prop { .. } => {}
+                Token::End => break,
+            }
+        }
+        None
+    }
+
+    /// Rate of the platform timer from `/cpus/timebase-frequency`.
+    pub fn timebase_frequency(&self) -> Option<u64> {
+        let value = self.node_property("cpus", "timebase-frequency")?;
+        match value.len() {
+            4 => be32(value, 0).map(u64::from),
+            8 => be64(value, 0),
+            _ => None,
+        }
+    }
+}
+
 /// One structure-block token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token<'a> {

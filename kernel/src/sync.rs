@@ -1,18 +1,20 @@
-//! A spinlock. The only lock the kernel has until M3 brings threads.
+//! A spinlock that masks interrupts while held.
 //!
-//! Not yet interrupt-safe: interrupts are off for the whole of M2, and M3
-//! will add interrupt masking inside `lock` when it turns them on. A lock
-//! that spins for too long panics rather than hanging silently, which on a
-//! single hart means "someone locked it twice".
+//! Masking is what makes it safe to take the same lock from a thread and
+//! from an interrupt handler on the same hart: the handler cannot run while
+//! the thread holds the lock. A lock that spins for too long panics rather
+//! than hanging silently, which on one hart means "someone locked it twice".
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::arch::interrupts;
+
 /// Spins this many times before deciding the lock is never coming back.
 const STUCK_AFTER: u32 = 100_000_000;
 
-/// Mutual exclusion by spinning.
+/// Mutual exclusion by spinning, with interrupts off while held.
 pub struct SpinLock<T> {
     locked: AtomicBool,
     data: UnsafeCell<T>,
@@ -22,9 +24,11 @@ pub struct SpinLock<T> {
 // can be shared across harts as long as `T` itself can be sent between them.
 unsafe impl<T: Send> Sync for SpinLock<T> {}
 
-/// Exclusive access to the data; releases the lock when dropped.
+/// Exclusive access to the data; releases the lock and restores the
+/// interrupt state when dropped.
 pub struct Guard<'a, T> {
     lock: &'a SpinLock<T>,
+    interrupts_were_enabled: bool,
 }
 
 impl<T> SpinLock<T> {
@@ -35,8 +39,10 @@ impl<T> SpinLock<T> {
         }
     }
 
-    /// Acquires the lock, spinning until it is free.
+    /// Acquires the lock, spinning until it is free. Interrupts stay off
+    /// until the guard is dropped.
     pub fn lock(&self) -> Guard<'_, T> {
+        let interrupts_were_enabled = interrupts::disable();
         let mut spins = 0u32;
         while self
             .locked
@@ -49,7 +55,19 @@ impl<T> SpinLock<T> {
             }
             core::hint::spin_loop();
         }
-        Guard { lock: self }
+        Guard {
+            lock: self,
+            interrupts_were_enabled,
+        }
+    }
+
+    /// Releases the lock without a guard. For the panic path only.
+    ///
+    /// # Safety
+    /// Any live guard becomes a lie. Call this only when the holder can
+    /// never run again, such as from the panic handler on its way out.
+    pub unsafe fn force_unlock(&self) {
+        self.locked.store(false, Ordering::Release);
     }
 }
 
@@ -73,6 +91,7 @@ impl<T> DerefMut for Guard<'_, T> {
 impl<T> Drop for Guard<'_, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
+        interrupts::restore(self.interrupts_were_enabled);
     }
 }
 
@@ -84,5 +103,22 @@ crate::ktest! {
             *guard += 1;
         }
         assert_eq!(*lock.lock(), 2);
+    }
+}
+
+crate::ktest! {
+    fn spinlock_masks_interrupts_while_held() {
+        let outer = SpinLock::new(());
+        let inner = SpinLock::new(());
+        interrupts::enable();
+        {
+            let _a = outer.lock();
+            assert!(!interrupts::enabled(), "interrupts must be off inside the lock");
+            {
+                let _b = inner.lock();
+            }
+            assert!(!interrupts::enabled(), "a nested lock must not re-enable them");
+        }
+        assert!(interrupts::enabled(), "dropping the guard restores them");
     }
 }

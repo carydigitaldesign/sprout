@@ -2,18 +2,23 @@
 
 mod backtrace;
 mod boot;
+mod context;
 // Every CSR gets read and write; not every milestone uses both.
 #[allow(dead_code)]
 mod csr;
 mod exit;
+pub mod interrupts;
 // The full page-table API is exercised by tests; the kernel itself only
 // needs all of it once address spaces are built and torn down (M4, M5).
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 mod paging;
+mod plic;
 mod sbi;
 mod trap;
+mod uart;
 
-pub use backtrace::{frame_pointer, frames_from as stack_frames};
+pub use backtrace::{boot_stack, frame_pointer, frames_from as stack_frames, set_current_stack};
+pub use context::{Context, switch};
 pub use exit::exit;
 pub use paging::{PAGE_SIZE, PageTable, phys_to_virt, virt_to_phys};
 
@@ -21,10 +26,29 @@ pub use paging::{PAGE_SIZE, PageTable, phys_to_virt, virt_to_phys};
 pub const NAME: &str = "riscv64";
 
 /// Runs before the first log line: find the SBI console, install the trap
-/// vector so a fault from here on is reported rather than silent.
+/// vector so a fault from here on is reported rather than silent, and tell
+/// the backtrace walker about the boot stack.
 pub fn init_early() {
     sbi::init();
     trap::init();
+    backtrace::init();
+}
+
+/// Brings up the interrupt controller and the console's receive interrupt.
+/// Needs the direct map, so it runs after `mm::init`.
+pub fn init_devices() {
+    plic::init();
+    uart::init();
+}
+
+/// The platform timer counter. Its rate comes from the device tree.
+pub fn timer_cycles() -> u64 {
+    csr::time::read() as u64
+}
+
+/// Raises a supervisor timer interrupt once the counter reaches `deadline`.
+pub fn set_timer(deadline: u64) {
+    sbi::set_timer(deadline);
 }
 
 /// Writes one byte to the firmware console.
@@ -44,17 +68,13 @@ pub fn console_backend() -> &'static str {
 /// Parks this hart until an interrupt arrives, forever.
 pub fn wait_forever() -> ! {
     loop {
-        // SAFETY: `wfi` only pauses the hart until an interrupt; it reads and
-        // writes no memory and changes no architectural state we rely on.
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        interrupts::wait_for_interrupt();
     }
 }
 
 crate::ktest! {
     fn boot_stack_is_16_byte_aligned() {
-        let sp: usize;
-        // SAFETY: reading the stack pointer register has no side effects.
-        unsafe { core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack)) };
-        assert_eq!(sp % 16, 0, "sp = {sp:#x}");
+        let (_, top) = boot_stack();
+        assert_eq!(top % 16, 0, "stack top = {top:#x}");
     }
 }

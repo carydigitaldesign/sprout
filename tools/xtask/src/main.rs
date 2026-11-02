@@ -481,6 +481,8 @@ const LOC_TARGETS: &[(&str, usize)] = &[
     ("log", 250),
     ("fdt", 300),
     ("sync", 200),
+    ("time", 200),
+    ("console", 200),
     ("testing", 250),
     ("panic", 100),
 ];

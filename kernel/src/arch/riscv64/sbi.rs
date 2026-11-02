@@ -15,6 +15,10 @@ const EID_LEGACY_CONSOLE_PUTCHAR: usize = 0x01;
 const EID_DEBUG_CONSOLE: usize = 0x4442_434E;
 const FID_DEBUG_CONSOLE_WRITE_BYTE: usize = 2;
 
+/// Timer extension ("TIME").
+const EID_TIMER: usize = 0x5449_4D45;
+const FID_TIMER_SET: usize = 0;
+
 /// System Reset extension ("SRST").
 const EID_SYSTEM_RESET: usize = 0x5352_5354;
 const FID_SYSTEM_RESET: usize = 0;
@@ -77,6 +81,12 @@ pub fn console_putc(byte: u8) {
     } else {
         call(EID_LEGACY_CONSOLE_PUTCHAR, 0, byte as usize, 0, 0);
     }
+}
+
+/// Programs the next supervisor timer interrupt for when the `time`
+/// counter reaches `deadline`. Also clears any pending one.
+pub fn set_timer(deadline: u64) {
+    call(EID_TIMER, FID_TIMER_SET, deadline as usize, 0, 0);
 }
 
 /// Asks the firmware to power the machine off. Returns only if it cannot.

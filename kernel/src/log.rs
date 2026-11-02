@@ -8,10 +8,16 @@
 //! Build a line with [`event`], [`info`], [`warn`] or [`error`], add fields,
 //! and finish with [`Line::end`]. Values are escaped so the output is always
 //! valid JSON, which is what `tools/mcp-dev` and `cargo xtask test` parse.
+//!
+//! A [`Line`] holds the console lock from start to `end`, so lines from
+//! different threads and interrupt handlers never interleave.
 
 use core::fmt::{self, Write};
 
 use crate::arch;
+use crate::sync::{Guard, SpinLock};
+
+static CONSOLE: SpinLock<()> = SpinLock::new(());
 
 /// The boot console as a `fmt::Write` sink.
 struct Console;
@@ -49,6 +55,7 @@ impl<W: Write> Write for Escaper<'_, W> {
 #[must_use = "a log line is only printed in full by calling .end()"]
 pub struct Line {
     first: bool,
+    _console: Guard<'static, ()>,
 }
 
 /// Integer types that print as bare JSON numbers.
@@ -58,10 +65,25 @@ macro_rules! num {
 }
 num!(u8 u16 u32 u64 usize i8 i16 i32 i64 isize);
 
-/// Starts an empty object.
+/// Starts an empty object. Takes the console lock until `end()`.
 pub fn line() -> Line {
+    let console = CONSOLE.lock();
     let _ = Console.write_str("{");
-    Line { first: true }
+    Line {
+        first: true,
+        _console: console,
+    }
+}
+
+/// Releases the console lock without a guard, so a panic that happens
+/// while a line is being built can still be reported.
+///
+/// # Safety
+/// Only from the panic handler, after interrupts are off: the holder is
+/// this very context or one that will never run again.
+pub unsafe fn force_unlock_console() {
+    // SAFETY: forwarded from the caller's contract.
+    unsafe { CONSOLE.force_unlock() };
 }
 
 /// Starts a line describing a lifecycle event: `boot`, `exit`, `panic`, ...
@@ -148,7 +170,7 @@ impl Line {
         self
     }
 
-    /// Closes the object and ends the line.
+    /// Closes the object and ends the line, releasing the console.
     pub fn end(self) {
         let _ = Console.write_str("}\n");
     }
@@ -173,7 +195,10 @@ crate::ktest! {
             }
         }
 
-        let mut buf = Buf { data: [0; 64], len: 0 };
+        let mut buf = Buf {
+            data: [0; 64],
+            len: 0,
+        };
         Escaper(&mut buf).write_str("a\"b\\c\nd\te\u{1}f").unwrap();
         let got = core::str::from_utf8(&buf.data[..buf.len]).unwrap();
         assert_eq!(got, "a\\\"b\\\\c\\nd\\te\\u0001f");
