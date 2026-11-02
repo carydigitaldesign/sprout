@@ -20,3 +20,8 @@ user programs from an initramfs with userspace virtio drivers (riscv64 for
 now), and serves MCP over HTTP from inside the OS (`cargo xtask run`, then
 `claude mcp add --transport http sprout-os http://127.0.0.1:8080/mcp`).
 See [PLAN.md](PLAN.md), [docs/design/](docs/design/) and [docs/adr/](docs/adr/).
+
+## License
+
+MIT or Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
