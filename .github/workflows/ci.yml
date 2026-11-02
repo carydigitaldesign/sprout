@@ -13,19 +13,31 @@ jobs:
       matrix:
         arch: [riscv64, x86_64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # rustup reads rust-toolchain.toml and installs the pinned toolchain,
       # components and both bare-metal targets.
       - name: Install Rust toolchain
         run: rustup show
 
+      # Newer Ubuntu splits QEMU per architecture (qemu-system-riscv) and
+      # leaves qemu-system-misc as a shell; older ones only have the latter.
+      # The riscv64 machine boots with `-bios default`, which is OpenSBI,
+      # a Recommends we skip, so it is named explicitly.
       - name: Install QEMU
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-misc qemu-system-x86
-          qemu-system-riscv64 --version
-          qemu-system-x86_64 --version
+          case "${{ matrix.arch }}" in
+            riscv64)
+              if apt-cache show qemu-system-riscv >/dev/null 2>&1; then
+                pkgs="qemu-system-riscv opensbi"
+              else
+                pkgs="qemu-system-misc opensbi"
+              fi ;;
+            x86_64) pkgs="qemu-system-x86" ;;
+          esac
+          sudo apt-get install -y --no-install-recommends $pkgs
+          qemu-system-${{ matrix.arch }} --version
 
       - uses: actions/cache@v4
         with:
