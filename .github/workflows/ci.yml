@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  kernel:
+    name: lint, test, loc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup reads rust-toolchain.toml and installs the pinned toolchain,
+      # components and the riscv64 target.
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-misc
+          qemu-system-riscv64 --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Lint (SAFETY comments)
+        run: cargo xtask lint
+
+      - name: Boot and run kernel tests
+        run: cargo xtask test --timeout 120
+
+      - name: Line counts
+        run: cargo xtask loc

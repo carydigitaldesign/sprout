@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["kernel", "tools/xtask"]
+# A bare `cargo build` builds only the host tooling. The kernel is a
+# cross-compiled no_std binary and is built through `cargo xtask build`.
+default-members = ["tools/xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+debug = 1

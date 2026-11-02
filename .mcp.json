@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sprout-dev": {
+      "command": "python",
+      "args": ["tools/mcp-dev/server.py"]
+    }
+  }
+}

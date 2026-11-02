@@ -1,0 +1,11 @@
+# Developed on Windows, built on Linux CI: keep every text file LF so linker
+# scripts, assembly and Python behave the same everywhere (ADR-0005).
+* text=auto eol=lf
+*.rs text eol=lf
+*.ld text eol=lf
+*.S text eol=lf
+*.toml text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.json text eol=lf

@@ -1,0 +1,8 @@
+# Pinned at the first successful build (docs/design/M0.md). Upgrades are a commit.
+# On Windows the host must be the windows-gnu flavour (ADR-0005):
+#   rustup set default-host x86_64-pc-windows-gnu
+[toolchain]
+channel = "1.99.1"
+components = ["rust-src", "llvm-tools", "rustfmt", "clippy"]
+targets = ["riscv64gc-unknown-none-elf"]
+profile = "minimal"

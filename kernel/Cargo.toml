@@ -1,0 +1,20 @@
+[package]
+name = "sprout-kernel"
+description = "Sprout: an AI-native capability microkernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sprout-kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+# Build the test kernel: runs every `ktest!` and exits QEMU with the result.
+ktest = []
+
+# Kernel dependencies need an ADR (ADR-0001). None yet.
+[dependencies]
