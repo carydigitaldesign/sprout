@@ -34,7 +34,10 @@ jobs:
         run: cargo xtask lint
 
       - name: Boot and run kernel tests
-        run: cargo xtask test --timeout 120
+        run: cargo xtask test --timeout 180
+
+      - name: Talk to the in-OS MCP server from the host
+        run: cargo xtask mcp-check
 
       - name: Line counts
         run: cargo xtask loc

@@ -75,11 +75,11 @@ pub extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     #[cfg(not(feature = "ktest"))]
     {
         let init = obj::process::spawn_init().unwrap_or_else(|e| panic!("cannot start init: {e}"));
-        let code = init.wait();
-        log::event("init_exited").num("code", code).end();
+        drop(init);
 
-        // Nothing else to run, so `main` leaves and `idle` keeps the hart
-        // in `wfi`. This is where `cargo xtask run` and MCP `boot`
+        // `init` and whatever it starts (mcpd keeps serving) run on their
+        // own; `main` leaves. `idle` keeps the hart in `wfi` whenever
+        // nothing is ready. This is where `cargo xtask run` and MCP `boot`
         // sessions sit; typed bytes arrive as `console_rx` events.
         log::event("idle")
             .num("threads", sched::live_threads())

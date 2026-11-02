@@ -1,9 +1,9 @@
 //! Virtio for Sprout user drivers: the modern (version 2) virtio-mmio
-//! transport, one split virtqueue, and the virtio-blk request format.
-//! Spec: <https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html>.
+//! transport, split virtqueues, and the block and network device
+//! protocols. Spec: <https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html>.
 //!
 //! The caller owns the memory: a mapped register window (`device_map`) and
-//! a contiguous buffer whose physical address it knows (`vmo_physical`).
+//! contiguous buffers whose physical addresses it knows (`vmo_physical`).
 //! This crate never allocates and never talks to the kernel.
 
 #![no_std]
@@ -37,6 +37,7 @@ mod reg {
 }
 
 pub const MAGIC: u32 = 0x7472_6976;
+pub const DEVICE_ID_NET: u32 = 1;
 pub const DEVICE_ID_BLOCK: u32 = 2;
 
 mod status {
@@ -49,6 +50,8 @@ mod status {
 
 /// Feature bit 32: the device speaks the modern (version 1) protocol.
 const FEATURE_VERSION_1: u64 = 1 << 32;
+/// virtio-net feature bit 5: the device has a MAC address in config space.
+const FEATURE_NET_MAC: u64 = 1 << 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtioError {
@@ -59,6 +62,7 @@ pub enum VirtioError {
     QueueTooSmall(u32),
     QueueFull,
     RequestFailed(u8),
+    FrameTooLarge,
 }
 
 /// A mapped virtio-mmio register window.
@@ -91,8 +95,9 @@ impl Mmio {
     }
 
     /// Checks the device is the kind we want and runs the status
-    /// handshake up to `FEATURES_OK`, accepting only `VERSION_1`.
-    pub fn initialize(&self, wanted_device: u32) -> Result<(), VirtioError> {
+    /// handshake up to `FEATURES_OK`, accepting `VERSION_1` plus whatever
+    /// of `wanted_features` the device offers. Returns what was accepted.
+    pub fn initialize(&self, wanted_device: u32, wanted_features: u64) -> Result<u64, VirtioError> {
         let magic = self.read(reg::MAGIC);
         if magic != MAGIC {
             return Err(VirtioError::BadMagic(magic));
@@ -118,7 +123,7 @@ impl Mmio {
             self.write(reg::DEVICE_FEATURES_SEL, sel);
             offered |= (self.read(reg::DEVICE_FEATURES) as u64) << (32 * sel);
         }
-        let accepted = offered & FEATURE_VERSION_1;
+        let accepted = offered & (FEATURE_VERSION_1 | wanted_features);
         for sel in 0..2u32 {
             self.write(reg::DRIVER_FEATURES_SEL, sel);
             self.write(reg::DRIVER_FEATURES, (accepted >> (32 * sel)) as u32);
@@ -131,7 +136,7 @@ impl Mmio {
             self.write(reg::STATUS, status::FAILED);
             return Err(VirtioError::FeaturesRejected);
         }
-        Ok(())
+        Ok(accepted)
     }
 
     /// Tells the device where queue `index` lives and marks it ready.
@@ -168,7 +173,9 @@ impl Mmio {
     /// Reads and clears the interrupt status bits.
     pub fn ack_interrupt(&self) -> u32 {
         let bits = self.read(reg::INTERRUPT_STATUS);
-        self.write(reg::INTERRUPT_ACK, bits);
+        if bits != 0 {
+            self.write(reg::INTERRUPT_ACK, bits);
+        }
         bits
     }
 
@@ -176,10 +183,16 @@ impl Mmio {
     pub fn config_u32(&self, offset: usize) -> u32 {
         self.read(reg::CONFIG + offset)
     }
+
+    /// One byte of device configuration space.
+    pub fn config_u8(&self, offset: usize) -> u8 {
+        // SAFETY: as for `read`; config space is byte-addressable.
+        unsafe { core::ptr::read_volatile((self.base + reg::CONFIG + offset) as *const u8) }
+    }
 }
 
-/// Entries per queue. Small on purpose: one request at a time is plenty
-/// for a first driver, and the whole queue fits in a page.
+/// Entries per queue. Small on purpose: a handful of buffers in flight is
+/// plenty for a first driver, and the whole queue fits in half a page.
 pub const QUEUE_SIZE: usize = 8;
 
 const DESC_F_NEXT: u16 = 1;
@@ -199,16 +212,16 @@ struct Desc {
 const DESC_OFFSET: usize = 0;
 const AVAIL_OFFSET: usize = DESC_OFFSET + QUEUE_SIZE * 16;
 const USED_OFFSET: usize = 1024;
-/// Bytes a queue needs: fits in one page.
+/// Bytes a queue needs: two fit in one page.
 pub const QUEUE_BYTES: usize = 2048;
 
-/// One split virtqueue over caller-provided memory. Descriptors are handed
-/// out in order and the queue is drained after each request, so there is
-/// no free list.
+/// One split virtqueue over caller-provided memory, with a free list of
+/// descriptors so several chains can be in flight.
 pub struct Virtqueue {
     base: usize,
     physical: u64,
-    next_desc: u16,
+    free: [u16; QUEUE_SIZE],
+    free_count: usize,
     avail_idx: u16,
     last_used: u16,
 }
@@ -221,10 +234,15 @@ impl Virtqueue {
     /// The memory must be mapped, zeroed, physically contiguous, and used
     /// by nothing else.
     pub unsafe fn new(base: usize, physical: u64) -> Virtqueue {
+        let mut free = [0u16; QUEUE_SIZE];
+        for (i, slot) in free.iter_mut().enumerate() {
+            *slot = (QUEUE_SIZE - 1 - i) as u16;
+        }
         Virtqueue {
             base,
             physical,
-            next_desc: 0,
+            free,
+            free_count: QUEUE_SIZE,
             avail_idx: 0,
             last_used: 0,
         }
@@ -242,6 +260,11 @@ impl Virtqueue {
         (self.base + DESC_OFFSET + i as usize * 16) as *mut Desc
     }
 
+    fn read_desc(&self, i: u16) -> Desc {
+        // SAFETY: inside the descriptor table per `new`'s contract.
+        unsafe { core::ptr::read_volatile(self.desc_ptr(i)) }
+    }
+
     fn write_u16(&self, offset: usize, value: u16) {
         // SAFETY: inside the queue memory per `new`'s contract.
         unsafe { core::ptr::write_volatile((self.base + offset) as *mut u16, value) };
@@ -252,15 +275,23 @@ impl Virtqueue {
         unsafe { core::ptr::read_volatile((self.base + offset) as *const u16) }
     }
 
-    /// Queues a chain of buffers as one request. Each entry is
-    /// `(physical address, length, device_writes)`.
-    fn push_chain(&mut self, buffers: &[(u64, u32, bool)]) -> Result<u16, VirtioError> {
-        if buffers.is_empty() || buffers.len() > QUEUE_SIZE {
+    /// Descriptors not in flight.
+    pub fn free_descriptors(&self) -> usize {
+        self.free_count
+    }
+
+    /// Queues a chain of buffers as one request and returns its head.
+    /// Each entry is `(physical address, length, device_writes)`.
+    pub fn push_chain(&mut self, buffers: &[(u64, u32, bool)]) -> Result<u16, VirtioError> {
+        if buffers.is_empty() || buffers.len() > self.free_count {
             return Err(VirtioError::QueueFull);
         }
-        let head = self.next_desc;
+        let mut indices = [0u16; QUEUE_SIZE];
+        for slot in indices.iter_mut().take(buffers.len()) {
+            self.free_count -= 1;
+            *slot = self.free[self.free_count];
+        }
         for (i, &(addr, len, writable)) in buffers.iter().enumerate() {
-            let index = (head + i as u16) % QUEUE_SIZE as u16;
             let last = i + 1 == buffers.len();
             let mut flags = if writable { DESC_F_WRITE } else { 0 };
             if !last {
@@ -270,16 +301,12 @@ impl Virtqueue {
                 addr,
                 len,
                 flags,
-                next: if last {
-                    0
-                } else {
-                    (index + 1) % QUEUE_SIZE as u16
-                },
+                next: if last { 0 } else { indices[i + 1] },
             };
             // SAFETY: `desc_ptr` is inside the descriptor table.
-            unsafe { core::ptr::write_volatile(self.desc_ptr(index), desc) };
+            unsafe { core::ptr::write_volatile(self.desc_ptr(indices[i]), desc) };
         }
-        self.next_desc = (head + buffers.len() as u16) % QUEUE_SIZE as u16;
+        let head = indices[0];
 
         // avail: flags u16, idx u16, ring[QUEUE_SIZE] u16
         let slot = AVAIL_OFFSET + 4 + (self.avail_idx as usize % QUEUE_SIZE) * 2;
@@ -297,17 +324,37 @@ impl Virtqueue {
         self.read_u16(USED_OFFSET + 2) != self.last_used
     }
 
-    /// Collects one completed request; returns its head descriptor.
-    fn pop_used(&mut self) -> Option<u16> {
+    /// Collects one completed chain: its head and the bytes the device
+    /// wrote. The chain's descriptors return to the free list.
+    pub fn pop_used(&mut self) -> Option<(u16, u32)> {
         if !self.has_used() {
             return None;
         }
         // used: flags u16, idx u16, ring[QUEUE_SIZE] of { id u32, len u32 }
         let slot = USED_OFFSET + 4 + (self.last_used as usize % QUEUE_SIZE) * 8;
         // SAFETY: inside the used ring.
-        let id = unsafe { core::ptr::read_volatile((self.base + slot) as *const u32) };
+        let (id, len) = unsafe {
+            (
+                core::ptr::read_volatile((self.base + slot) as *const u32),
+                core::ptr::read_volatile((self.base + slot + 4) as *const u32),
+            )
+        };
         self.last_used = self.last_used.wrapping_add(1);
-        Some(id as u16)
+
+        let head = id as u16;
+        let mut index = head;
+        loop {
+            let desc = self.read_desc(index);
+            if self.free_count < QUEUE_SIZE {
+                self.free[self.free_count] = index;
+                self.free_count += 1;
+            }
+            if desc.flags & DESC_F_NEXT == 0 {
+                break;
+            }
+            index = desc.next;
+        }
+        Some((head, len))
     }
 }
 
@@ -357,7 +404,7 @@ impl BlockDevice {
         request_base: usize,
         request_physical: u64,
     ) -> Result<BlockDevice, VirtioError> {
-        mmio.initialize(DEVICE_ID_BLOCK)?;
+        mmio.initialize(DEVICE_ID_BLOCK, 0)?;
         // SAFETY: forwarded from this function's contract.
         let queue = unsafe { Virtqueue::new(queue_base, queue_physical) };
         mmio.install_queue(0, &queue)?;
@@ -440,5 +487,178 @@ impl BlockDevice {
             );
         }
         Ok(Some(()))
+    }
+}
+
+/// Receive buffers kept posted to a network device.
+pub const NET_RX_BUFFERS: usize = 4;
+/// Bytes per network buffer: a 12-byte virtio-net header plus a full
+/// Ethernet frame, rounded up.
+pub const NET_BUFFER_BYTES: usize = 2048;
+/// virtio-net header size with `VERSION_1`.
+const NET_HEADER_BYTES: usize = 12;
+/// Largest Ethernet frame a buffer carries.
+pub const NET_MTU: usize = 1514;
+/// Bytes of buffer memory a [`NetDevice`] needs: receive buffers plus one
+/// transmit buffer.
+pub const NET_BUFFERS_BYTES: usize = (NET_RX_BUFFERS + 1) * NET_BUFFER_BYTES;
+/// Bytes of queue memory a [`NetDevice`] needs: receive and transmit queues.
+pub const NET_QUEUES_BYTES: usize = 2 * QUEUE_BYTES;
+
+/// A virtio-net device: queue 0 receives, queue 1 transmits, one transmit
+/// in flight at a time.
+pub struct NetDevice {
+    mmio: Mmio,
+    rx: Virtqueue,
+    tx: Virtqueue,
+    buffers: usize,
+    buffers_physical: u64,
+    /// Which receive buffer each descriptor head carries.
+    rx_buffer_of: [u8; QUEUE_SIZE],
+    tx_busy: bool,
+    mac: [u8; 6],
+}
+
+impl NetDevice {
+    /// Brings the device up and posts every receive buffer. `queues_*` is
+    /// `NET_QUEUES_BYTES` of memory, `buffers_*` is `NET_BUFFERS_BYTES`.
+    ///
+    /// # Safety
+    /// See [`Mmio::new`] and [`Virtqueue::new`]; both regions must be
+    /// mapped, physically contiguous and otherwise unused.
+    pub unsafe fn new(
+        mmio: Mmio,
+        queues_base: usize,
+        queues_physical: u64,
+        buffers_base: usize,
+        buffers_physical: u64,
+    ) -> Result<NetDevice, VirtioError> {
+        let accepted = mmio.initialize(DEVICE_ID_NET, FEATURE_NET_MAC)?;
+        // SAFETY: forwarded from this function's contract.
+        let (rx, tx) = unsafe {
+            (
+                Virtqueue::new(queues_base, queues_physical),
+                Virtqueue::new(
+                    queues_base + QUEUE_BYTES,
+                    queues_physical + QUEUE_BYTES as u64,
+                ),
+            )
+        };
+        mmio.install_queue(0, &rx)?;
+        mmio.install_queue(1, &tx)?;
+        mmio.driver_ok();
+
+        let mut mac = [0u8; 6];
+        if accepted & FEATURE_NET_MAC != 0 {
+            for (i, b) in mac.iter_mut().enumerate() {
+                *b = mmio.config_u8(i);
+            }
+        }
+        let mut device = NetDevice {
+            mmio,
+            rx,
+            tx,
+            buffers: buffers_base,
+            buffers_physical,
+            rx_buffer_of: [0; QUEUE_SIZE],
+            tx_busy: false,
+            mac,
+        };
+        for buffer in 0..NET_RX_BUFFERS {
+            device.post_rx(buffer)?;
+        }
+        device.mmio.notify(0);
+        Ok(device)
+    }
+
+    /// The device's MAC address (zeros if it offered none).
+    pub fn mac(&self) -> [u8; 6] {
+        self.mac
+    }
+
+    fn buffer_va(&self, buffer: usize) -> usize {
+        self.buffers + buffer * NET_BUFFER_BYTES
+    }
+
+    fn buffer_pa(&self, buffer: usize) -> u64 {
+        self.buffers_physical + (buffer * NET_BUFFER_BYTES) as u64
+    }
+
+    fn post_rx(&mut self, buffer: usize) -> Result<(), VirtioError> {
+        let head =
+            self.rx
+                .push_chain(&[(self.buffer_pa(buffer), NET_BUFFER_BYTES as u32, true)])?;
+        self.rx_buffer_of[head as usize] = buffer as u8;
+        Ok(())
+    }
+
+    /// A received frame, if any: `(buffer, frame length)`. Read it with
+    /// [`Self::rx_frame`], then hand the buffer back with [`Self::recycle_rx`].
+    pub fn receive(&mut self) -> Option<(usize, usize)> {
+        let (head, len) = self.rx.pop_used()?;
+        let buffer = self.rx_buffer_of[head as usize] as usize;
+        let len = (len as usize).saturating_sub(NET_HEADER_BYTES);
+        Some((buffer, len.min(NET_MTU)))
+    }
+
+    /// The Ethernet frame in a received buffer.
+    pub fn rx_frame(&self, buffer: usize, len: usize) -> &[u8] {
+        // SAFETY: the buffer region is ours per `new`'s contract and the
+        // device finished writing it (the used ring said so).
+        unsafe {
+            core::slice::from_raw_parts(
+                (self.buffer_va(buffer) + NET_HEADER_BYTES) as *const u8,
+                len,
+            )
+        }
+    }
+
+    /// Posts a receive buffer again once its frame has been consumed.
+    pub fn recycle_rx(&mut self, buffer: usize) {
+        if self.post_rx(buffer).is_ok() {
+            self.mmio.notify(0);
+        }
+    }
+
+    /// Collects finished transmissions.
+    pub fn reap_tx(&mut self) {
+        while self.tx.pop_used().is_some() {
+            self.tx_busy = false;
+        }
+    }
+
+    /// Sends one Ethernet frame. Waits for the previous one to finish.
+    pub fn transmit(&mut self, frame: &[u8]) -> Result<(), VirtioError> {
+        if frame.len() > NET_MTU {
+            return Err(VirtioError::FrameTooLarge);
+        }
+        while self.tx_busy {
+            self.reap_tx();
+            core::hint::spin_loop();
+        }
+        let buffer = NET_RX_BUFFERS;
+        let va = self.buffer_va(buffer);
+        // SAFETY: the transmit buffer is ours and idle.
+        unsafe {
+            core::ptr::write_bytes(va as *mut u8, 0, NET_HEADER_BYTES);
+            core::ptr::copy_nonoverlapping(
+                frame.as_ptr(),
+                (va + NET_HEADER_BYTES) as *mut u8,
+                frame.len(),
+            );
+        }
+        self.tx.push_chain(&[(
+            self.buffer_pa(buffer),
+            (NET_HEADER_BYTES + frame.len()) as u32,
+            false,
+        )])?;
+        self.tx_busy = true;
+        self.mmio.notify(1);
+        Ok(())
+    }
+
+    /// Reads and clears the device's interrupt status.
+    pub fn ack_interrupt(&self) -> u32 {
+        self.mmio.ack_interrupt()
     }
 }

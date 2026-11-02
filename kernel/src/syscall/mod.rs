@@ -81,6 +81,7 @@ pub fn dispatch(num: usize, args: [usize; 6]) -> isize {
         sys::DEVICE_IRQ_WAIT => device::irq_wait(&process, args[0] as Handle, args[1] as u64),
         sys::DEVICE_IRQ_ACK => device::irq_ack(&process, args[0] as Handle),
         sys::VMO_PHYSICAL => device::vmo_physical(&process, args[0] as Handle, args[1]),
+        sys::CLOCK_NS => Ok(time::now_ns() as usize),
         _ => Err(Error::NoSuchSyscall),
     };
     match result {

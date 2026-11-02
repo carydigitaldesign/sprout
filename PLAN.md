@@ -178,9 +178,11 @@ crates (`smoltcp`, `virtio-drivers`) because userspace is not the kernel.
 Each milestone ends with: boots in QEMU, kernel tests pass, CI green, and a
 one-page `docs/design/Mx.md` written by whoever did the work, human or AI.
 
-Progress: **M0 to M6 done** (2026-11-02, see `docs/design/M0.md` through
-`M6.md`). The kernel is self-describing, processes talk over channels, and
-a virtio-blk driver runs in userspace from an initramfs. Next: M7.
+Progress: **M0 to M7 done** (2026-11-02, see `docs/design/M0.md` through
+`M7.md`). The kernel is self-describing, processes talk over channels,
+drivers run in userspace from an initramfs, and `mcpd` serves MCP over
+HTTP from inside the OS: `claude mcp add --transport http sprout-os
+http://127.0.0.1:8080/mcp` against a running kernel. Next: M8.
 
 | M | Name | Done when | Estimate |
 |---|------|-----------|----------|

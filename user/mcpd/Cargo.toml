@@ -1,0 +1,19 @@
+[package]
+name = "mcpd"
+description = "Serves the Model Context Protocol over HTTP from inside Sprout, with its own virtio-net driver and TCP stack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mcpd"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+sprout-rt = { path = "../../lib/sprout-rt" }
+sprout-virtio = { path = "../../lib/sprout-virtio" }
+# TCP/IP without std or alloc: fixed buffers, Ethernet, IPv4, TCP.
+smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp"] }

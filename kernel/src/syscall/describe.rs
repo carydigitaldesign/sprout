@@ -37,7 +37,17 @@ pub fn kernel() -> String {
         .str("object", "kernel")
         .str("name", "sprout")
         .str("version", crate::VERSION)
-        .str("arch", arch::NAME);
+        .str("arch", arch::NAME)
+        // "test" is the test kernel: init shuts services down when done
+        // so the run can end; "run" keeps them serving.
+        .str(
+            "mode",
+            if cfg!(feature = "ktest") {
+                "test"
+            } else {
+                "run"
+            },
+        );
     j.array("object_types");
     for t in ObjectType::ALL {
         j.push_str(t.name());

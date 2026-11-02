@@ -88,6 +88,11 @@ pub fn sleep_ms(ms: u64) {
     let _ = call(abi::sys::SLEEP, [ms as usize, 0, 0, 0, 0, 0]);
 }
 
+/// Nanoseconds since boot.
+pub fn clock_ns() -> u64 {
+    syscall(abi::sys::CLOCK_NS, [0; 6]) as u64
+}
+
 /// Fills `buf` with the JSON description of `handle` (or the kernel, for
 /// [`HANDLE_KERNEL`]). Returns the number of bytes the full description
 /// needs; if that is larger than `buf`, the text was cut short.

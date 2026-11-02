@@ -2,9 +2,10 @@
 //!
 //! Its bootstrap handle is the initramfs. It starts `fsd` and hands it the
 //! archive, then gets every other program from `fsd`: `shell`, which it
-//! drives over a channel (ping/pong, a port, a VMO shared both ways), and
-//! `blkd`, which it gives the virtio-blk device the kernel discovered.
-//! Its exit code is the kernel test's verdict: 0 means every check passed.
+//! drives over a channel; `blkd`, which it gives the virtio-blk device;
+//! and `mcpd`, which it gives the virtio-net device and a shell of its own.
+//! In the test kernel it shuts `mcpd` down and exits with the verdict (0
+//! means every check passed); in a normal boot it leaves `mcpd` serving.
 
 #![no_std]
 #![no_main]
@@ -39,7 +40,7 @@ fn check(what: &str, ok: bool) -> bool {
     ok
 }
 
-/// The description of `handle`, if it has one, for cheap type checks.
+/// The start of a handle's description, for cheap type checks.
 fn describe_prefix(handle: rt::Handle, buf: &mut [u8; 256]) -> Option<usize> {
     let needed = rt::describe(handle, buf).ok()?;
     Some(needed.min(buf.len()))
@@ -51,6 +52,15 @@ fn describe_prefix(handle: rt::Handle, buf: &mut [u8; 256]) -> Option<usize> {
 fn is_channel(handle: rt::Handle) -> bool {
     let mut buf = [0u8; 256];
     describe_prefix(handle, &mut buf).is_some() && buf.starts_with(br#"{"object":"channel""#)
+}
+
+/// Whether this is the test kernel, which wants services shut down at the
+/// end so the run can finish.
+fn test_mode() -> bool {
+    let mut buf = [0u8; 256];
+    describe_prefix(rt::HANDLE_KERNEL, &mut buf).is_some_and(|n| {
+        core::str::from_utf8(&buf[..n]).is_ok_and(|s| s.contains(r#""mode":"test""#))
+    })
 }
 
 /// Sends one command and returns the reply as a string.
@@ -86,6 +96,21 @@ fn spawn(fs: rt::Handle, name: &str, bootstrap: rt::Handle) -> Result<rt::Handle
     let process = rt::process_spawn(image, bootstrap, name);
     let _ = rt::handle_close(image);
     process
+}
+
+/// The handle of the first device whose description names `kind` (a
+/// virtio device name such as `block` or `network`). Devices come after
+/// the bootstrap handle.
+fn find_device(kind: &str) -> Option<rt::Handle> {
+    let mut buf = [0u8; 256];
+    let mut needle = rt::StackString::<48>::new();
+    let _ = core::fmt::Write::write_fmt(&mut needle, format_args!(r#""virtio_device":"{kind}""#));
+    (rt::HANDLE_BOOTSTRAP + 1..rt::HANDLE_BOOTSTRAP + 16).find(|&h| {
+        describe_prefix(h, &mut buf).is_some_and(|n| {
+            buf.starts_with(br#"{"object":"device""#)
+                && core::str::from_utf8(&buf[..n]).is_ok_and(|s| s.contains(needle.as_str()))
+        })
+    })
 }
 
 fn syscall_checks() -> bool {
@@ -246,21 +271,8 @@ fn shell_checks(fs: rt::Handle) -> bool {
     ok
 }
 
-/// The handle of the first device whose description names a virtio block
-/// device. Devices come after the bootstrap handle.
-fn find_block_device() -> Option<rt::Handle> {
-    let mut buf = [0u8; 256];
-    (rt::HANDLE_BOOTSTRAP + 1..rt::HANDLE_BOOTSTRAP + 16).find(|&h| {
-        describe_prefix(h, &mut buf).is_some_and(|n| {
-            buf.starts_with(br#"{"object":"device""#)
-                && core::str::from_utf8(&buf[..n])
-                    .is_ok_and(|s| s.contains(r#""virtio_device":"block""#))
-        })
-    })
-}
-
 fn blkd_checks(fs: rt::Handle) -> bool {
-    let Some(device) = find_block_device() else {
+    let Some(device) = find_device("block") else {
         rt::log("no virtio block device handle");
         return false;
     };
@@ -287,9 +299,53 @@ fn blkd_checks(fs: rt::Handle) -> bool {
     ok
 }
 
+/// Starts `mcpd` with the network device and a shell of its own. In test
+/// mode it is told to exit once ready; otherwise this never returns.
+fn mcpd_checks(fs: rt::Handle, test: bool) -> bool {
+    let Some(device) = find_device("network") else {
+        rt::log("no virtio network device handle");
+        return false;
+    };
+    let mut ok = show("network device", device);
+    let result = (|| -> Result<bool, rt::Error> {
+        let (shell_ours, shell_theirs) = rt::channel_create()?;
+        let shell = spawn(fs, "shell", shell_theirs)?;
+        let (ours, theirs) = rt::channel_create()?;
+        let mcpd = spawn(fs, "mcpd", theirs)?;
+        let for_mcpd = rt::handle_duplicate(device, rt::Rights::ALL)?;
+        rt::channel_send(ours, b"net", &[for_mcpd])?;
+        rt::channel_send(ours, b"shell", &[shell_ours])?;
+        let mut buf = [0u8; 256];
+        let mut handles = [0 as rt::Handle; 1];
+        let (n, _) = rt::channel_recv(ours, &mut buf, &mut handles, 10_000)?;
+        let reply = core::str::from_utf8(&buf[..n]).unwrap_or("?");
+        rt::log!("mcpd says: {reply}");
+        if reply != "ready" {
+            return Ok(false);
+        }
+        if test {
+            rt::channel_send(ours, b"exit", &[])?;
+            let mcpd_code = rt::process_wait(mcpd)?;
+            // mcpd's exit closes its end of the shell channel; the shell leaves.
+            let shell_code = rt::process_wait(shell)?;
+            rt::handle_close(ours)?;
+            rt::handle_close(mcpd)?;
+            rt::handle_close(shell)?;
+            Ok(mcpd_code == 0 && shell_code == 0)
+        } else {
+            rt::log("init: mcpd is serving; staying up as its parent");
+            let _ = rt::process_wait(mcpd);
+            Ok(true)
+        }
+    })();
+    ok &= check("mcpd comes up on the network", result == Ok(true));
+    ok
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     rt::log("hello from userspace");
+    let test = test_mode();
     let mut ok = syscall_checks();
     let fs = match start_fsd() {
         Ok(fs) => fs,
@@ -301,6 +357,7 @@ pub extern "C" fn main() -> i32 {
     ok &= check("fsd is serving", true);
     ok &= shell_checks(fs);
     ok &= blkd_checks(fs);
+    ok &= mcpd_checks(fs, test);
     ok &= check("fsd exits 0", rt::channel_send(fs, b"exit", &[]).is_ok());
     rt::yield_now();
     rt::sleep_ms(5);

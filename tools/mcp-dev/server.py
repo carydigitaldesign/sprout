@@ -238,6 +238,21 @@ def gdb_inspect(session: str, commands: list[str]) -> dict:
 
 
 @mcp.tool()
+def mcp_check(timeout_s: float = 240) -> dict:
+    """Boot the kernel and talk to the MCP server running INSIDE Sprout from the host:
+    initialize, tools/list, and a shell ping through its HTTP endpoint on localhost:8080.
+    While a `boot` session is running you can also add that server to Claude Code yourself:
+    claude mcp add --transport http sprout-os http://127.0.0.1:8080/mcp"""
+    try:
+        p = _xtask(["mcp-check"], timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "mcp-check did not return in time"}
+    parsed = [_parse(l) for l in p.stdout.splitlines()]
+    result = next((d["mcp_check"] for d in parsed if "mcp_check" in d), None)
+    return {"ok": p.returncode == 0, "result": result, "console_tail": parsed[-20:], "stderr": _tail(p.stderr, 40)}
+
+
+@mcp.tool()
 def symbolize(addrs: list[str], ktest: bool = False, release: bool = False) -> dict:
     """Resolve kernel addresses (e.g. the "frames" of a panic or trap line) to function, file and line.
     Use ktest=True for addresses from the test kernel. `test` already does this for failures."""

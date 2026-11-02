@@ -72,6 +72,7 @@ pub mod sys {
     pub const DEVICE_IRQ_WAIT: usize = 21;
     pub const DEVICE_IRQ_ACK: usize = 22;
     pub const VMO_PHYSICAL: usize = 23;
+    pub const CLOCK_NS: usize = 24;
 }
 
 /// Flags for `vmo_create`.
@@ -560,6 +561,15 @@ pub const SYSCALLS: &[Syscall] = &[
         rights: Rights::MAP,
         doc: "The physical address behind a byte of a CONTIGUOUS VMO, to hand to a \
               device. This is the DMA capability: give it only to drivers.",
+    },
+    Syscall {
+        num: sys::CLOCK_NS,
+        name: "clock_ns",
+        args: &[],
+        returns: "nanoseconds since boot",
+        object: None,
+        rights: Rights::NONE,
+        doc: "A monotonic clock, for timeouts and protocol timers.",
     },
 ];
 

@@ -9,6 +9,7 @@ members = [
     "user/shell",
     "user/fsd",
     "user/blkd",
+    "user/mcpd",
     "tools/xtask",
 ]
 # A bare `cargo build` builds only the host tooling. The kernel is a

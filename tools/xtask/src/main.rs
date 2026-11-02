@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         "run" => run(flags),
         "test" => test(flags),
         "qemu-args" => qemu_args_command(flags),
+        "mcp-check" => mcp_check(flags),
         "symbolize" => symbolize_command(flags),
         "loc" => Ok(loc()),
         "lint" => Ok(lint()),
@@ -64,6 +65,7 @@ fn print_help() {
   test  [--release] [--timeout SECS]     boot the test kernel; exit 0 only if every test passed
   qemu-args [--ktest] [--release] [--gdb] build, then print the QEMU argv as a JSON array
   symbolize [--ktest] [--release] ADDR... function, file and line for kernel addresses
+  mcp-check [--timeout SECS]             boot, then talk to the in-OS MCP server from the host
   loc                                    line counts per subsystem vs. PLAN.md targets
   lint                                   every `unsafe` block needs a // SAFETY: comment"
     );
@@ -138,7 +140,10 @@ fn kernel_path(opts: &BuildOptions) -> PathBuf {
 }
 
 /// User programs, built before the kernel so it can embed them.
-const USER_PROGRAMS: &[&str] = &["init", "shell", "fsd", "blkd"];
+const USER_PROGRAMS: &[&str] = &["init", "shell", "fsd", "blkd", "mcpd"];
+
+/// Host TCP port forwarded to the guest's port 80, where mcpd listens.
+const HOST_MCP_PORT: u16 = 8080;
 
 /// Builds the user programs into `target/user`, packs them into an
 /// initramfs (newc cpio) and returns the archive's path for the kernel
@@ -428,6 +433,14 @@ fn qemu_argv(kernel: &Path, gdb: bool) -> Vec<String> {
         argv.push("-device".to_string());
         argv.push("virtio-blk-device,drive=disk0".to_string());
     }
+    // User-mode networking: the guest is 10.0.2.15; its port 80 (mcpd) is
+    // reachable from the host at 127.0.0.1:HOST_MCP_PORT.
+    argv.push("-netdev".to_string());
+    argv.push(format!(
+        "user,id=net0,hostfwd=tcp:127.0.0.1:{HOST_MCP_PORT}-:80"
+    ));
+    argv.push("-device".to_string());
+    argv.push("virtio-net-device,netdev=net0".to_string());
     if gdb {
         // Halt at reset with a gdbstub on localhost:1234.
         argv.extend(["-s", "-S"].iter().map(|s| s.to_string()));
@@ -733,4 +746,136 @@ fn lint() -> u8 {
         println!("lint: {problems} problem(s)");
         1
     }
+}
+
+// -------------------------------------------------------------- mcp-check
+
+/// One HTTP POST to the in-OS MCP server; returns the response body.
+fn mcp_post(port: u16, body: &str) -> Result<String, String> {
+    use std::io::{Read, Write as _};
+    use std::net::TcpStream;
+    let mut stream = TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_secs(5),
+    )
+    .map_err(|e| format!("connect: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| format!("socket: {e}"))?;
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("read: {e}"))?;
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| format!("no HTTP header in response: {text:?}"))?;
+    if !head.starts_with("HTTP/1.1 200") {
+        return Err(format!(
+            "status line: {}",
+            head.lines().next().unwrap_or("")
+        ));
+    }
+    Ok(body.to_string())
+}
+
+/// Boots the kernel, waits for mcpd to listen, and speaks MCP to it from
+/// the host: initialize, tools/list, and a shell ping. Exit 0 if all three
+/// answered as expected.
+fn mcp_check(flags: &[String]) -> Result<u8, String> {
+    let kernel = build(&BuildOptions::from_flags(flags))?;
+    let timeout = timeout_from(flags, 120)?;
+    let argv = qemu_argv(&kernel, false);
+    let mut child = spawn_qemu(&argv, Stdio::null())?;
+
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let (tx, rx) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Wait for mcpd to announce itself.
+    let deadline = Instant::now() + timeout;
+    let mut listening = false;
+    while !listening {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(line) => {
+                println!("{line}");
+                listening = line.contains("mcpd: listening");
+            }
+            Err(_) => break,
+        }
+    }
+    if !listening {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("mcpd never announced it was listening".to_string());
+    }
+    // Keep draining the console in the background.
+    thread::spawn(move || {
+        for line in rx {
+            println!("{line}");
+        }
+    });
+
+    let port = HOST_MCP_PORT;
+    let init = mcp_post(
+        port,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"xtask","version":"0.1"}}}"#,
+    );
+    let list = mcp_post(port, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
+    let ping = mcp_post(
+        port,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shell","arguments":{"command":"ping"}}}"#,
+    );
+    let kernel_desc = mcp_post(
+        port,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"kernel","arguments":{}}}"#,
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let init_ok = init
+        .as_ref()
+        .is_ok_and(|b| b.contains("\"protocolVersion\"") && b.contains("\"sprout\""));
+    let list_ok = list
+        .as_ref()
+        .is_ok_and(|b| b.contains("\"name\":\"shell\"") && b.contains("\"name\":\"kernel\""));
+    let ping_ok = ping.as_ref().is_ok_and(|b| b.contains("pong"));
+    let kernel_ok = kernel_desc.as_ref().is_ok_and(|b| b.contains("clock_ns"));
+    let ok = init_ok && list_ok && ping_ok && kernel_ok;
+    let show = |r: Result<String, String>| match r {
+        Ok(body) => body,
+        Err(e) => format!("ERROR {e}"),
+    };
+    let summary = json!({
+        "mcp_check": {
+            "ok": ok,
+            "port": port,
+            "initialize_ok": init_ok,
+            "initialize": show(init),
+            "tools_list_ok": list_ok,
+            "tools_list_bytes": list.as_ref().map(|b| b.len()).unwrap_or(0),
+            "tools_list_error": list.as_ref().err().cloned(),
+            "shell_ping_ok": ping_ok,
+            "shell_ping": show(ping),
+            "kernel_tool_ok": kernel_ok,
+            "kernel_tool_bytes": kernel_desc.as_ref().map(|b| b.len()).unwrap_or(0),
+            "kernel_tool_error": kernel_desc.as_ref().err().cloned(),
+        }
+    });
+    println!("{summary}");
+    Ok(if ok { 0 } else { 1 })
 }

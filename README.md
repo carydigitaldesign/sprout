@@ -15,4 +15,8 @@ and it is built by AI agents through the same protocol.
   mind, not chased.
 - First target riscv64 on QEMU; x86_64 second. Developed natively on Windows.
 
-Status: planning. See [PLAN.md](PLAN.md) and [docs/adr/](docs/adr/).
+Status: M0 to M7 done. It boots on riscv64 under QEMU, runs user programs
+from an initramfs with userspace virtio drivers, and serves MCP over HTTP
+from inside the OS (`cargo xtask run`, then
+`claude mcp add --transport http sprout-os http://127.0.0.1:8080/mcp`).
+See [PLAN.md](PLAN.md), [docs/design/](docs/design/) and [docs/adr/](docs/adr/).
