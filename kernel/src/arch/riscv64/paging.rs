@@ -4,6 +4,10 @@
 //! The kernel lives in the upper half and reaches every physical address
 //! through the direct map at [`PHYS_MAP_BASE`]. Page tables are ordinary
 //! frames from the frame allocator, read and written through that map.
+//!
+//! User address spaces share the kernel's upper half by copying the
+//! kernel root's top-level entries, so the kernel is mapped (supervisor
+//! only) in every process and traps need no table switch.
 
 use super::csr;
 use crate::mm::frame::{self, Frame};
@@ -30,6 +34,8 @@ pub fn virt_to_phys(va: usize) -> usize {
 
 const ENTRIES: usize = 512;
 const LEVELS: usize = 3;
+/// Top-level entries from here up are the kernel's half.
+const KERNEL_HALF_START: usize = ENTRIES / 2;
 
 const PTE_V: u64 = 1 << 0;
 const PTE_R: u64 = 1 << 1;
@@ -105,7 +111,9 @@ fn table_at<'a>(pa: usize) -> &'a mut Table {
     // SAFETY: every `pa` passed here is a frame this module allocated as a
     // page table (or the root frame owned by a `PageTable`), reached
     // through the direct map. Only one walk touches a table at a time
-    // because the owning `PageTable` is borrowed for the whole operation.
+    // because the owning `PageTable` is borrowed for the whole operation;
+    // the kernel's shared sub-tables are only ever read through user
+    // tables, never modified.
     unsafe { &mut *(phys_to_virt(pa) as *mut Table) }
 }
 
@@ -139,22 +147,58 @@ fn flush_tlb_all() {
     unsafe { core::arch::asm!("sfence.vma", options(nostack)) };
 }
 
-/// An Sv39 address space. Owns its root and intermediate tables; leaf
-/// pages belong to whoever mapped them.
+/// Switches to the address space rooted at `root_pa`.
+///
+/// # Safety
+/// The table must map the currently executing code and stack at the
+/// addresses in use. Every table built here maps the kernel half, so a
+/// switch from kernel code is sound for any of them.
+pub unsafe fn activate_root(root_pa: usize) {
+    const MODE_SV39: usize = 8 << 60;
+    // SAFETY: forwarded from the caller's contract; writing satp then
+    // flushing the TLB is the documented sequence.
+    unsafe { csr::satp::write(MODE_SV39 | (root_pa >> 12)) };
+    flush_tlb_all();
+}
+
+/// An Sv39 address space. Owns its root and the intermediate tables of
+/// its own half; leaf pages belong to whoever mapped them.
 pub struct PageTable {
     root: Frame,
+    /// A user table: its upper half is borrowed from the kernel table and
+    /// must not be freed with it.
+    shares_kernel_half: bool,
 }
 
 impl PageTable {
     /// An empty address space.
     pub fn new() -> Result<PageTable, MapError> {
         let root = frame::alloc_zeroed().ok_or(MapError::OutOfMemory)?;
-        Ok(PageTable { root })
+        Ok(PageTable {
+            root,
+            shares_kernel_half: false,
+        })
     }
 
-    /// Physical address of the root table, for `satp`. Used from M4 when
-    /// address spaces are switched per process.
-    #[allow(dead_code)]
+    /// A user address space: empty lower half, the kernel's upper half.
+    pub fn new_user(kernel_root_pa: usize) -> Result<PageTable, MapError> {
+        let table = PageTable::new()?;
+        let (user, kernel) = (table_at(table.root.pa()), table_at(kernel_root_pa));
+        user[KERNEL_HALF_START..].copy_from_slice(&kernel[KERNEL_HALF_START..]);
+        Ok(PageTable {
+            root: table.root_without_drop(),
+            shares_kernel_half: true,
+        })
+    }
+
+    /// Takes the root out of a table that must not run its destructor.
+    fn root_without_drop(self) -> Frame {
+        let root = self.root;
+        core::mem::forget(self);
+        root
+    }
+
+    /// Physical address of the root table, for `satp`.
     pub fn root_pa(&self) -> usize {
         self.root.pa()
     }
@@ -243,25 +287,20 @@ impl PageTable {
     /// Makes this the active address space.
     ///
     /// # Safety
-    /// The table must map the currently executing code, the stack, and
-    /// everything the kernel will touch, at the addresses it will use.
+    /// See [`activate_root`].
     pub unsafe fn activate(&self) {
-        const MODE_SV39: usize = 8 << 60;
-        // SAFETY: the caller guarantees the table is complete for the
-        // kernel; writing satp then flushing the TLB is the documented
-        // sequence for switching address spaces.
-        unsafe { csr::satp::write(MODE_SV39 | (self.root.pa() >> 12)) };
-        flush_tlb_all();
+        // SAFETY: forwarded from the caller's contract.
+        unsafe { activate_root(self.root.pa()) };
     }
 }
 
-fn free_subtables(table_pa: usize, level: usize) {
+fn free_subtables(table_pa: usize, level: usize, limit: usize) {
     if level == 0 {
         return;
     }
-    for entry in table_at(table_pa).iter() {
+    for entry in table_at(table_pa)[..limit].iter() {
         if entry.is_valid() && !entry.is_leaf() {
-            free_subtables(entry.pa(), level - 1);
+            free_subtables(entry.pa(), level - 1, ENTRIES);
             frame::free(Frame::from_pa(entry.pa()));
         }
     }
@@ -269,7 +308,12 @@ fn free_subtables(table_pa: usize, level: usize) {
 
 impl Drop for PageTable {
     fn drop(&mut self) {
-        free_subtables(self.root.pa(), LEVELS - 1);
+        let limit = if self.shares_kernel_half {
+            KERNEL_HALF_START
+        } else {
+            ENTRIES
+        };
+        free_subtables(self.root.pa(), LEVELS - 1, limit);
         frame::free(self.root);
     }
 }
@@ -325,6 +369,26 @@ crate::ktest! {
         assert_eq!(
             table.map(0x123, 0x1000, PageSize::Size4K, MapFlags::READ),
             Err(MapError::Misaligned)
+        );
+    }
+}
+
+crate::ktest! {
+    fn user_table_shares_the_kernel_half_and_keeps_it_on_drop() {
+        let before = frame::stats().free;
+        let kernel_root = crate::mm::kernel_root_pa();
+        let kernel_text = crate::kmain as *const () as usize;
+        {
+            let user = PageTable::new_user(kernel_root).expect("user table");
+            let expected = crate::mm::with_kernel_table(|k| k.translate(kernel_text));
+            assert_eq!(user.translate(kernel_text), expected, "kernel visible in user table");
+            assert!(!expected.expect("mapped").1.contains(MapFlags::USER));
+            assert_eq!(user.translate(0x1_0000), None, "user half starts empty");
+        }
+        assert_eq!(frame::stats().free, before, "dropping a user table freed kernel tables");
+        assert!(
+            crate::mm::with_kernel_table(|k| k.translate(kernel_text)).is_some(),
+            "kernel mapping survived"
         );
     }
 }

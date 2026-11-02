@@ -1,0 +1,14 @@
+[package]
+name = "sprout-rt"
+description = "Userspace runtime for Sprout programs: entry point, syscall stubs, panic handler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+sprout-abi = { path = "../sprout-abi" }

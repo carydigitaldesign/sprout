@@ -178,8 +178,8 @@ crates (`smoltcp`, `virtio-drivers`) because userspace is not the kernel.
 Each milestone ends with: boots in QEMU, kernel tests pass, CI green, and a
 one-page `docs/design/Mx.md` written by whoever did the work, human or AI.
 
-Progress: **M0 to M3 done** (2026-11-02, see `docs/design/M0.md` through
-`M3.md`). Next: M4.
+Progress: **M0 to M4 done** (2026-11-02, see `docs/design/M0.md` through
+`M4.md`). The kernel is self-describing. Next: M5.
 
 | M | Name | Done when | Estimate |
 |---|------|-----------|----------|

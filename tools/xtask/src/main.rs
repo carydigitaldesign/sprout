@@ -137,11 +137,46 @@ fn kernel_path(opts: &BuildOptions) -> PathBuf {
         .join(KERNEL_BINARY)
 }
 
-/// Cross-compiles the kernel and returns the path of the ELF.
-fn build(opts: &BuildOptions) -> Result<PathBuf, String> {
+/// User programs, built before the kernel so it can embed them.
+const USER_PROGRAMS: &[&str] = &["init"];
+
+/// Builds the user programs into `target/user` and returns the path of
+/// `init`, which the kernel's build script embeds.
+fn build_user(release: bool) -> Result<PathBuf, String> {
+    let dir = root().join("target").join("user");
     let mut cmd = Command::new(cargo());
     cmd.current_dir(root())
-        .args(["build", "--package", KERNEL_PACKAGE, "--target", TARGET]);
+        .arg("build")
+        .arg("--target")
+        .arg(TARGET);
+    for program in USER_PROGRAMS {
+        cmd.args(["--package", program]);
+    }
+    cmd.arg("--target-dir").arg(&dir);
+    if release {
+        cmd.arg("--release");
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+    if !status.success() {
+        return Err("user program build failed".to_string());
+    }
+    let profile = if release { "release" } else { "debug" };
+    Ok(dir.join(TARGET).join(profile).join("init"))
+}
+
+/// Cross-compiles the user programs, then the kernel; returns the kernel ELF.
+fn build(opts: &BuildOptions) -> Result<PathBuf, String> {
+    let init = build_user(opts.release)?;
+    let mut cmd = Command::new(cargo());
+    cmd.current_dir(root()).env("SPROUT_INIT_ELF", &init).args([
+        "build",
+        "--package",
+        KERNEL_PACKAGE,
+        "--target",
+        TARGET,
+    ]);
     if opts.ktest {
         cmd.args(["--features", "ktest"]);
         cmd.arg("--target-dir").arg(target_dir(opts));
@@ -483,6 +518,10 @@ const LOC_TARGETS: &[(&str, usize)] = &[
     ("sync", 200),
     ("time", 200),
     ("console", 200),
+    ("json", 300),
+    ("elf", 300),
+    ("obj", 1500),
+    ("syscall", 1000),
     ("testing", 250),
     ("panic", 100),
 ];

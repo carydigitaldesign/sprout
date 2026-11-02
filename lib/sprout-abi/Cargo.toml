@@ -1,0 +1,13 @@
+[package]
+name = "sprout-abi"
+description = "What the Sprout kernel and its userspace agree on: syscalls, errors, rights, object types, and the schema that describes them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+bench = false
+
+[dependencies]

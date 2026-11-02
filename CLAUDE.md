@@ -75,6 +75,22 @@ over running these by hand; they return structured results.
   Do not paste from them. Write it, understand it, test it.
 - Finish a milestone with a one-page `docs/design/Mx.md`.
 
+## Userspace
+
+- The syscall table in `lib/sprout-abi/src/lib.rs` is the spec. Adding a
+  syscall means: a number and a `Syscall` entry there, a wrapper in
+  `lib/sprout-rt`, the implementation in `kernel/src/syscall/mod.rs`, and a
+  check in `user/init` (plus an ADR, per the rules).
+- User pointers are untrusted. Go through `syscall::user::{copy_from_user,
+  copy_to_user, check_range}`; never dereference one directly.
+- Objects live in `kernel/src/obj`; a new object type is an `Object` variant,
+  an `ObjectType` in the ABI, and a branch in `describe`.
+- User programs are `no_std` crates under `user/` linking `sprout-rt`, with a
+  five-line `build.rs` that points at `lib/sprout-rt/user.ld`. `cargo xtask
+  build` builds them first; the kernel embeds `init`.
+- A user fault kills the process (exit code 128 + cause) and logs a
+  `user_fault` event; a kernel fault is still a panic.
+
 ## Layout
 
 See `PLAN.md` section 4. Short version: `kernel/` (the kernel), `lib/sprout-abi`

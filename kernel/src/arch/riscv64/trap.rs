@@ -1,15 +1,18 @@
 //! Supervisor trap entry: every exception and interrupt lands here.
 //!
-//! `__trap_entry` saves the interrupted context into a [`TrapFrame`] on the
-//! current stack, calls [`trap_handler`], restores the frame and returns
-//! with `sret`. Until user mode exists (M4) every trap comes from the kernel
-//! itself, so the kernel stack is the right place for the frame.
+//! `__trap_entry` saves the interrupted context into a [`TrapFrame`], calls
+//! [`trap_handler`], restores the frame and returns with `sret`.
 //!
-//! Policy at M1: breakpoints (`ebreak`) are counted and skipped, which is
-//! how the tests exercise this path without dying; every other exception is
-//! logged as a JSON `trap` event with the faulting context's backtrace and
-//! then turned into a panic. Interrupts are logged and ignored; none are
-//! enabled before M3.
+//! Traps from the kernel use the current stack. Traps from user mode must
+//! not: `sscratch` holds the thread's kernel stack top while user code
+//! runs (set by `enter_user` and again on every return to user) and zero
+//! while the kernel runs, so one `csrrw` tells the two apart.
+//!
+//! Policy: `ecall` from user mode is a syscall. Breakpoints (`ebreak`) are
+//! counted and skipped, which is how the tests exercise this path. Any
+//! other exception from user mode kills the process; from the kernel it
+//! is logged with the faulting context's backtrace and turned into a
+//! panic. Timer and external interrupts go to their handlers.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -21,7 +24,7 @@ use crate::log;
 #[repr(C)]
 pub struct TrapFrame {
     /// General registers `x0..x31`. `regs[0]` is never written; `regs[2]`
-    /// is the stack pointer before the frame was pushed.
+    /// is the stack pointer at the time of the trap (user or kernel).
     pub regs: [usize; 32],
     pub sstatus: usize,
     pub sepc: usize,
@@ -43,6 +46,12 @@ core::arch::global_asm!(
     .globl __trap_entry
     .type __trap_entry, @function
 __trap_entry:
+    // From user mode sscratch holds our kernel stack and sp the user's:
+    // swap. From the kernel sscratch is zero: swap back.
+    csrrw sp, sscratch, sp
+    bnez sp, 1f
+    csrrw sp, sscratch, sp
+1:
     addi sp, sp, -288
 
     // Save every general register except x0 (always zero) and x2 (sp),
@@ -50,8 +59,18 @@ __trap_entry:
     .irp n, 1,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
     sd x\n, 8*\n(sp)
     .endr
-    addi t0, sp, 288
-    sd t0, 16(sp)
+
+    // The interrupted stack pointer: from user it is in sscratch, from
+    // the kernel it is sp + 288. SPP says which. Once saved, sscratch
+    // goes to zero so a nested trap knows it came from the kernel.
+    csrr t0, sstatus
+    andi t0, t0, 0x100
+    bnez t0, 2f
+    csrr t1, sscratch
+    csrw sscratch, zero
+    j 3f
+2:  addi t1, sp, 288
+3:  sd t1, 16(sp)
 
     csrr t0, sstatus
     sd t0, 256(sp)
@@ -67,15 +86,22 @@ __trap_entry:
 
     ld t0, 256(sp)
     csrw sstatus, t0
-    ld t0, 264(sp)
-    csrw sepc, t0
+    ld t1, 264(sp)
+    csrw sepc, t1
 
-    // Restore in the same order, t0 (x5) last because it is our scratch.
+    // Returning to user mode? The next trap must find this kernel stack,
+    // which is where sp will be once the frame is gone.
+    andi t0, t0, 0x100
+    bnez t0, 4f
+    addi t0, sp, 288
+    csrw sscratch, t0
+4:
+    // Restore in the same order; t0 (x5) and sp (x2) last.
     .irp n, 1,3,4,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
     ld x\n, 8*\n(sp)
     .endr
     ld x5, 40(sp)
-    addi sp, sp, 288
+    ld sp, 16(sp)
     sret
     .size __trap_entry, . - __trap_entry
 "#
@@ -89,8 +115,15 @@ unsafe extern "C" {
 const REG_SP: usize = 2;
 /// Index of the frame pointer (`s0`) in [`TrapFrame::regs`].
 const REG_FP: usize = 8;
+/// `a0`: first argument and the return value.
+const REG_A0: usize = 10;
+/// `a7`: the syscall number.
+const REG_A7: usize = 17;
+
+const SSTATUS_SPP: usize = 1 << 8;
 
 const EXC_BREAKPOINT: usize = 3;
+const EXC_USER_ECALL: usize = 8;
 const INT_SUPERVISOR_TIMER: usize = 5;
 const INT_SUPERVISOR_EXTERNAL: usize = 9;
 
@@ -111,8 +144,12 @@ pub fn init() {
     );
     // SAFETY: `__trap_entry` is a complete save/handle/restore sequence that
     // ends in `sret`, and the low bits are clear so the vector is in direct
-    // mode. From here on traps are handled rather than ignored.
-    unsafe { csr::stvec::write(entry) };
+    // mode. `sscratch` is zero while the kernel runs. From here on traps
+    // are handled rather than ignored.
+    unsafe {
+        csr::sscratch::write(0);
+        csr::stvec::write(entry);
+    }
 }
 
 /// How many `ebreak` instructions have been caught and skipped.
@@ -163,6 +200,7 @@ fn interrupt_name(code: usize) -> &'static str {
 extern "C" fn trap_handler(frame: &mut TrapFrame) {
     let is_interrupt = frame.scause >> (usize::BITS - 1) == 1;
     let code = frame.scause & (usize::MAX >> 1);
+    let from_user = frame.sstatus & SSTATUS_SPP == 0;
 
     if is_interrupt {
         match code {
@@ -179,6 +217,30 @@ extern "C" fn trap_handler(frame: &mut TrapFrame) {
                 .end(),
         }
         return;
+    }
+
+    if from_user && code == EXC_USER_ECALL {
+        // Resume after the ecall, then run the syscall with interrupts on:
+        // it may sleep or block like any kernel code.
+        frame.sepc += 4;
+        let args = [
+            frame.regs[REG_A0],
+            frame.regs[REG_A0 + 1],
+            frame.regs[REG_A0 + 2],
+            frame.regs[REG_A0 + 3],
+            frame.regs[REG_A0 + 4],
+            frame.regs[REG_A0 + 5],
+        ];
+        super::interrupts::enable();
+        let result = crate::syscall::dispatch(frame.regs[REG_A7], args);
+        super::interrupts::disable();
+        frame.regs[REG_A0] = result as usize;
+        return;
+    }
+
+    if from_user {
+        super::interrupts::enable();
+        crate::syscall::user_fault(exception_name(code), code, frame.sepc, frame.stval);
     }
 
     if code == EXC_BREAKPOINT {
@@ -241,5 +303,11 @@ crate::ktest! {
         };
         assert_eq!(t0, 0x1234, "t0 was clobbered across the trap");
         assert_eq!(a7, 0x5678, "a7 was clobbered across the trap");
+    }
+}
+
+crate::ktest! {
+    fn sscratch_is_zero_while_the_kernel_runs() {
+        assert_eq!(csr::sscratch::read(), 0);
     }
 }

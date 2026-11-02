@@ -1,23 +1,31 @@
 //! Kernel threads and a round-robin scheduler.
 //!
-//! Every thread owns a 16 KiB stack and a saved [`Context`]. A global
-//! scheduler holds raw pointers to leaked `Box<Thread>`s in a run queue, a
-//! sleeping list and a blocked list; threads are freed by whichever thread
-//! runs next after they exit. All of it lives behind one spinlock, which
-//! masks interrupts, so the timer tick and threads never race for it.
+//! Every thread owns a 16 KiB kernel stack and a saved [`Context`]. A
+//! global scheduler holds raw pointers to leaked `Box<Thread>`s in a run
+//! queue, a sleeping list and a blocked list; threads are freed by
+//! whichever thread runs next after they exit. All of it lives behind one
+//! spinlock, which masks interrupts, so the timer tick and threads never
+//! race for it.
 //!
 //! The boot context becomes thread 1, `main`. Thread 2, `idle`, only runs
 //! when nothing else can. Preemption: every timer tick, if another thread
 //! is ready, the running one goes to the back of the queue.
+//!
+//! A thread may belong to a process (M4); switching to it also switches
+//! the address space. Kernel-only threads run in whatever space is active,
+//! since the kernel is mapped in all of them.
 
 pub mod wait;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::arch::{self, Context, PAGE_SIZE, phys_to_virt};
 use crate::mm::frame::{self, Frame};
+use crate::obj::Process;
 use crate::sync::SpinLock;
 
 pub type ThreadId = u64;
@@ -38,14 +46,18 @@ enum State {
 
 struct Thread {
     id: ThreadId,
-    name: &'static str,
+    name: String,
     state: State,
     context: Context,
-    /// First frame of the stack, or `None` for the boot stack.
+    /// First frame of the kernel stack, or `None` for the boot stack.
     stack: Option<Frame>,
     stack_bounds: (usize, usize),
     /// What to run first; taken by the trampoline.
     entry: Option<(Entry, usize)>,
+    /// The process this thread runs user code for, if any.
+    process: Option<Arc<Process>>,
+    /// Root of the address space to run in.
+    root_pa: usize,
 }
 
 impl Drop for Thread {
@@ -94,16 +106,19 @@ fn with<R>(f: impl FnOnce(&mut Scheduler) -> R) -> R {
 /// Turns the boot context into thread `main` and creates `idle`.
 pub fn init() {
     let (bottom, top) = arch::boot_stack();
+    let kernel_root = crate::mm::kernel_root_pa();
     let main = Box::leak(Box::new(Thread {
         id: 1,
-        name: "main",
+        name: String::from("main"),
         state: State::Running,
         context: Context::empty(),
         stack: None,
         stack_bounds: (bottom, top),
         entry: None,
+        process: None,
+        root_pa: kernel_root,
     }));
-    let idle = new_thread(2, "idle", idle_entry, 0);
+    let idle = new_thread(2, "idle", idle_entry, 0, None, kernel_root);
     let mut slot = SCHED.lock();
     assert!(slot.is_none(), "scheduler initialised twice");
     *slot = Some(Scheduler {
@@ -125,34 +140,66 @@ fn idle_entry(_: usize) {
     }
 }
 
-fn new_thread(id: ThreadId, name: &'static str, entry: Entry, arg: usize) -> *mut Thread {
+fn new_thread(
+    id: ThreadId,
+    name: &str,
+    entry: Entry,
+    arg: usize,
+    process: Option<Arc<Process>>,
+    root_pa: usize,
+) -> *mut Thread {
     let first = frame::alloc_contiguous(STACK_FRAMES).expect("no memory for a thread stack");
     let bottom = phys_to_virt(first.pa());
     let top = bottom + STACK_FRAMES * PAGE_SIZE;
     Box::leak(Box::new(Thread {
         id,
-        name,
+        name: String::from(name),
         state: State::Ready,
         context: Context::new(trampoline, top),
         stack: Some(first),
         stack_bounds: (bottom, top),
         entry: Some((entry, arg)),
+        process,
+        root_pa,
     }))
 }
 
-/// Creates a thread that runs `entry(arg)` and queues it.
-pub fn spawn(name: &'static str, entry: Entry, arg: usize) -> ThreadId {
-    let id = with(|s| {
+fn enqueue_new(t: *mut Thread) -> ThreadId {
+    let p = Ptr(t);
+    with(|s| {
+        s.live.push(p);
+        s.run_queue.push_back(p);
+        thread(p).id
+    })
+}
+
+fn next_id() -> ThreadId {
+    with(|s| {
         let id = s.next_id;
         s.next_id += 1;
         id
-    });
-    let t = Ptr(new_thread(id, name, entry, arg));
-    with(|s| {
-        s.live.push(t);
-        s.run_queue.push_back(t);
-    });
-    id
+    })
+}
+
+/// Creates a kernel thread that runs `entry(arg)` and queues it.
+pub fn spawn(name: &str, entry: Entry, arg: usize) -> ThreadId {
+    let id = next_id();
+    let kernel_root = crate::mm::kernel_root_pa();
+    enqueue_new(new_thread(id, name, entry, arg, None, kernel_root))
+}
+
+/// Creates the kernel thread behind a user process's thread. `entry` runs
+/// on the kernel stack in the process's address space and is expected to
+/// drop into user mode.
+pub fn spawn_user(
+    name: &str,
+    process: Arc<Process>,
+    root_pa: usize,
+    entry: Entry,
+    arg: usize,
+) -> ThreadId {
+    let id = next_id();
+    enqueue_new(new_thread(id, name, entry, arg, Some(process), root_pa))
 }
 
 /// First code on a fresh stack, reached through `switch` with interrupts
@@ -211,6 +258,11 @@ fn schedule(why: Next) {
         s.current = next;
         let (bottom, top) = thread(next).stack_bounds;
         arch::set_current_stack(bottom, top);
+        if thread(next).root_pa != thread(cur).root_pa {
+            // SAFETY: every table carries the kernel half, so the code and
+            // stack running this switch stay mapped across it.
+            unsafe { arch::activate_root(thread(next).root_pa) };
+        }
         Some((cur, next))
     });
 
@@ -290,8 +342,18 @@ pub fn current_id() -> ThreadId {
 }
 
 /// The running thread's name.
-pub fn current_name() -> &'static str {
-    with(|s| thread(s.current).name)
+pub fn current_name() -> String {
+    with(|s| thread(s.current).name.clone())
+}
+
+/// The process the running thread belongs to, if any.
+pub fn current_process() -> Option<Arc<Process>> {
+    with(|s| thread(s.current).process.clone())
+}
+
+/// Top of the running thread's kernel stack.
+pub fn current_stack_top() -> usize {
+    with(|s| thread(s.current).stack_bounds.1)
 }
 
 /// Whether a thread exists and has not exited.
@@ -376,6 +438,7 @@ mod tests {
         fn current_thread_is_main_during_tests() {
             assert_eq!(current_id(), 1);
             assert_eq!(current_name(), "main");
+            assert!(current_process().is_none());
         }
     }
 }

@@ -123,6 +123,12 @@ pub fn boot_info() -> BootInfo {
     BOOT_INFO.lock().expect("mm::init has not run")
 }
 
+/// Root of the kernel's page table, which user tables share their upper
+/// half with.
+pub fn kernel_root_pa() -> usize {
+    with_kernel_table(|t| t.root_pa())
+}
+
 /// Runs a closure with the kernel page table.
 pub fn with_kernel_table<R>(f: impl FnOnce(&mut PageTable) -> R) -> R {
     let mut slot = KERNEL_TABLE.lock();

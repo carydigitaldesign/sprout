@@ -12,23 +12,28 @@ mod arch;
 // Console input is only consumed by tests until a shell exists (M5).
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 mod console;
+mod elf;
 mod fdt;
+// The JSON writer is a complete little API; not every method has a caller yet.
+#[allow(dead_code)]
+mod json;
 // The logging API is deliberately wider than any one milestone uses.
 #[allow(dead_code)]
 mod log;
 // Memory management's API is exercised by its tests; the kernel itself
-// grows into all of it over M3 to M5.
+// grows into all of it over M5.
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 mod mm;
+mod obj;
 mod panic;
-// Likewise for the scheduler and timer: nothing in the kernel sleeps or
-// joins until there is userspace to wait for.
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 mod sched;
 mod sync;
+mod syscall;
 mod testing;
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 mod time;
+mod user_image;
 
 /// Kernel version, from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -67,8 +72,13 @@ pub extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
 
     #[cfg(not(feature = "ktest"))]
     {
-        // Nothing to schedule yet, so `main` leaves and `idle` keeps the
-        // hart in `wfi`. This is where `cargo xtask run` and MCP `boot`
+        let init = obj::process::spawn("init", user_image::INIT_ELF)
+            .unwrap_or_else(|e| panic!("cannot start init: {e}"));
+        let code = init.wait();
+        log::event("init_exited").num("code", code).end();
+
+        // Nothing else to run, so `main` leaves and `idle` keeps the hart
+        // in `wfi`. This is where `cargo xtask run` and MCP `boot`
         // sessions sit; typed bytes arrive as `console_rx` events.
         log::event("idle")
             .num("threads", sched::live_threads())

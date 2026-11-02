@@ -15,6 +15,7 @@
 use core::fmt::{self, Write};
 
 use crate::arch;
+use crate::json::{Json, Num};
 use crate::sync::{Guard, SpinLock};
 
 static CONSOLE: SpinLock<()> = SpinLock::new(());
@@ -31,46 +32,20 @@ impl Write for Console {
     }
 }
 
-/// Wraps a sink and escapes everything written for the inside of a JSON string.
-struct Escaper<'a, W: Write>(&'a mut W);
-
-impl<W: Write> Write for Escaper<'_, W> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            match c {
-                '"' => self.0.write_str("\\\"")?,
-                '\\' => self.0.write_str("\\\\")?,
-                '\n' => self.0.write_str("\\n")?,
-                '\r' => self.0.write_str("\\r")?,
-                '\t' => self.0.write_str("\\t")?,
-                c if (c as u32) < 0x20 => write!(self.0, "\\u{:04x}", c as u32)?,
-                c => self.0.write_char(c)?,
-            }
-        }
-        Ok(())
-    }
-}
-
 /// A JSON object being written to the console. Must be finished with `end()`.
 #[must_use = "a log line is only printed in full by calling .end()"]
 pub struct Line {
-    first: bool,
+    json: Json<Console>,
     _console: Guard<'static, ()>,
 }
-
-/// Integer types that print as bare JSON numbers.
-pub trait Num: fmt::Display {}
-macro_rules! num {
-    ($($t:ty)*) => { $(impl Num for $t {})* };
-}
-num!(u8 u16 u32 u64 usize i8 i16 i32 i64 isize);
 
 /// Starts an empty object. Takes the console lock until `end()`.
 pub fn line() -> Line {
     let console = CONSOLE.lock();
-    let _ = Console.write_str("{");
+    let mut json = Json::new(Console);
+    json.push_object();
     Line {
-        first: true,
+        json,
         _console: console,
     }
 }
@@ -111,96 +86,49 @@ pub fn error(module: &str, msg: &str) -> Line {
 }
 
 impl Line {
-    fn key(&mut self, key: &str) {
-        if !self.first {
-            let _ = Console.write_str(",");
-        }
-        self.first = false;
-        let _ = Console.write_str("\"");
-        let _ = Escaper(&mut Console).write_str(key);
-        let _ = Console.write_str("\":");
-    }
-
     /// Adds a string field.
-    pub fn str(self, key: &str, value: &str) -> Self {
-        self.fmt(key, format_args!("{value}"))
+    pub fn str(mut self, key: &str, value: &str) -> Self {
+        self.json.str(key, value);
+        self
     }
 
     /// Adds a string field built from format arguments.
     pub fn fmt(mut self, key: &str, args: fmt::Arguments) -> Self {
-        self.key(key);
-        let _ = Console.write_str("\"");
-        let _ = Escaper(&mut Console).write_fmt(args);
-        let _ = Console.write_str("\"");
+        self.json.fmt(key, args);
         self
     }
 
     /// Adds an integer field.
     pub fn num<N: Num>(mut self, key: &str, value: N) -> Self {
-        self.key(key);
-        let _ = write!(Console, "{value}");
+        self.json.num(key, value);
         self
     }
 
     /// Adds a boolean field.
     pub fn bool(mut self, key: &str, value: bool) -> Self {
-        self.key(key);
-        let _ = Console.write_str(if value { "true" } else { "false" });
+        self.json.bool(key, value);
         self
     }
 
     /// Adds an address or bit pattern as a `"0x..."` string.
     pub fn hex(mut self, key: &str, value: usize) -> Self {
-        self.key(key);
-        let _ = write!(Console, "\"{value:#x}\"");
+        self.json.hex(key, value);
         self
     }
 
     /// Adds an array of addresses as `"0x..."` strings.
     pub fn hex_list(mut self, key: &str, values: impl IntoIterator<Item = usize>) -> Self {
-        self.key(key);
-        let _ = Console.write_str("[");
-        for (i, value) in values.into_iter().enumerate() {
-            if i > 0 {
-                let _ = Console.write_str(",");
-            }
-            let _ = write!(Console, "\"{value:#x}\"");
+        self.json.array(key);
+        for value in values {
+            self.json.push_hex(value);
         }
-        let _ = Console.write_str("]");
+        self.json.end();
         self
     }
 
     /// Closes the object and ends the line, releasing the console.
-    pub fn end(self) {
-        let _ = Console.write_str("}\n");
-    }
-}
-
-crate::ktest! {
-    fn escaper_produces_valid_json_strings() {
-        struct Buf {
-            data: [u8; 64],
-            len: usize,
-        }
-        impl Write for Buf {
-            fn write_str(&mut self, s: &str) -> fmt::Result {
-                for b in s.bytes() {
-                    if self.len == self.data.len() {
-                        return Err(fmt::Error);
-                    }
-                    self.data[self.len] = b;
-                    self.len += 1;
-                }
-                Ok(())
-            }
-        }
-
-        let mut buf = Buf {
-            data: [0; 64],
-            len: 0,
-        };
-        Escaper(&mut buf).write_str("a\"b\\c\nd\te\u{1}f").unwrap();
-        let got = core::str::from_utf8(&buf.data[..buf.len]).unwrap();
-        assert_eq!(got, "a\\\"b\\\\c\\nd\\te\\u0001f");
+    pub fn end(mut self) {
+        self.json.end();
+        let _ = Console.write_str("\n");
     }
 }

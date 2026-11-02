@@ -63,6 +63,17 @@ csr!(
     "sie"
 );
 csr!(
+    /// Scratch register: the kernel stack top while user code runs, zero
+    /// while the kernel runs (see `trap.rs`).
+    sscratch,
+    "sscratch"
+);
+csr!(
+    /// Where `sret` goes.
+    sepc,
+    "sepc"
+);
+csr!(
     /// The platform timer counter (`rdtime`), read-only.
     time,
     "time"
