@@ -3,7 +3,7 @@
  * Each section starts on its own page so the kernel's ELF loader can give
  * text, rodata and data different permissions without sharing pages.
  */
-OUTPUT_ARCH(riscv)
+
 ENTRY(_start)
 
 SECTIONS
@@ -19,6 +19,7 @@ SECTIONS
     .rodata : {
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
+        *(.got .got.plt)
     }
 
     . = ALIGN(4K);

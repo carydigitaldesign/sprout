@@ -94,10 +94,10 @@ _start:
     // A zero frame pointer ends every backtrace walk here.
     mv s0, zero
 
-    // a0 = hart id, a1 = dtb: passed through unchanged to kmain(hartid, dtb).
-    call kmain
+    // a0 = hart id, a1 = dtb: passed through unchanged to riscv_entry.
+    call riscv_entry
 
-    // kmain never returns; park if it somehow does.
+    // riscv_entry never returns; park if it somehow does.
 4:  wfi
     j 4b
     .size _start, . - _start

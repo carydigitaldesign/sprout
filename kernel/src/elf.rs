@@ -7,7 +7,12 @@ use core::fmt;
 const MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 const CLASS_64: u8 = 2;
 const TYPE_EXEC: u16 = 2;
-const MACHINE_RISCV: u16 = 243;
+/// `e_machine` for the architecture this kernel runs on; a program built
+/// for another one is refused.
+#[cfg(target_arch = "riscv64")]
+const MACHINE: u16 = 243;
+#[cfg(target_arch = "x86_64")]
+const MACHINE: u16 = 62;
 const PT_LOAD: u32 = 1;
 const PROGRAM_HEADER_SIZE: usize = 56;
 
@@ -17,7 +22,7 @@ pub enum ElfError {
     BadMagic,
     Not64Bit,
     NotExecutable,
-    NotRiscv,
+    WrongMachine,
     BadProgramHeaders,
     SegmentOutsideImage,
 }
@@ -29,7 +34,7 @@ impl fmt::Display for ElfError {
             ElfError::BadMagic => "not an ELF file",
             ElfError::Not64Bit => "not a 64-bit ELF",
             ElfError::NotExecutable => "not a static executable (ET_EXEC)",
-            ElfError::NotRiscv => "not a RISC-V ELF",
+            ElfError::WrongMachine => "built for another architecture",
             ElfError::BadProgramHeaders => "program header table is malformed",
             ElfError::SegmentOutsideImage => "a segment points outside the file",
         })
@@ -84,8 +89,8 @@ impl<'a> Elf<'a> {
         if u16_at(bytes, 16) != Some(TYPE_EXEC) {
             return Err(ElfError::NotExecutable);
         }
-        if u16_at(bytes, 18) != Some(MACHINE_RISCV) {
-            return Err(ElfError::NotRiscv);
+        if u16_at(bytes, 18) != Some(MACHINE) {
+            return Err(ElfError::WrongMachine);
         }
         let entry = u64_at(bytes, 24).ok_or(ElfError::TooShort)? as usize;
         let phoff = u64_at(bytes, 32).ok_or(ElfError::TooShort)? as usize;

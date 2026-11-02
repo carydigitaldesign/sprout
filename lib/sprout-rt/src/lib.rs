@@ -16,6 +16,7 @@ pub use sprout_abi::{
     HANDLE_SELF_PROCESS, Handle, Message, PortPacket, Rights, TIMEOUT_INFINITE, signals, vmo_flags,
 };
 
+#[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(
     r#"
     .section .text.start, "ax"
@@ -37,7 +38,28 @@ _start:
     sys_exit = const abi::sys::EXIT,
 );
 
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
+    r#"
+    .section .text.start, "ax"
+    .globl _start
+    .type _start, @function
+_start:
+    xor ebp, ebp
+    and rsp, -16
+    call main
+    // main's return value is the exit code.
+    mov edi, eax
+    mov eax, {sys_exit}
+    int 0x80
+1:  jmp 1b
+    .size _start, . - _start
+"#,
+    sys_exit = const abi::sys::EXIT,
+);
+
 /// Raw syscall. Prefer the typed wrappers below.
+#[cfg(target_arch = "riscv64")]
 #[inline]
 pub fn syscall(num: usize, args: [usize; 6]) -> isize {
     let result: isize;
@@ -54,6 +76,30 @@ pub fn syscall(num: usize, args: [usize; 6]) -> isize {
             in("a4") args[4],
             in("a5") args[5],
             in("a7") num,
+            options(nostack),
+        );
+    }
+    result
+}
+
+/// Raw syscall. Prefer the typed wrappers below.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn syscall(num: usize, args: [usize; 6]) -> isize {
+    let result: isize;
+    // SAFETY: `int 0x80` hands control to the kernel, which follows the
+    // ABI in `sprout-abi`: rdi, rsi, rdx, r10, r8, r9 arguments, rax number
+    // and result. The kernel treats every argument as untrusted.
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            inlateout("rax") num => result,
+            in("rdi") args[0],
+            in("rsi") args[1],
+            in("rdx") args[2],
+            in("r10") args[3],
+            in("r8") args[4],
+            in("r9") args[5],
             options(nostack),
         );
     }

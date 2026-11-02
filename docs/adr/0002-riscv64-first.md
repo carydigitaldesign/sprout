@@ -1,6 +1,8 @@
 # ADR-0002: First target is riscv64 on QEMU virt; x86_64 is port #2
 
 Status: accepted by the navigator on 2026-11-02 ("Yes, start M0")
+Amended by ADR-0007 (2026-11-02): the x86_64 port boots through Multiboot 1,
+not Limine.
 Date: 2026-11-02
 
 ## Context

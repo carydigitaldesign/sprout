@@ -28,12 +28,7 @@ impl fmt::Display for FdtError {
     }
 }
 
-/// A physical address range reported by the device tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Region {
-    pub base: usize,
-    pub size: usize,
-}
+pub use crate::handoff::Region;
 
 /// A parsed device tree header over a blob in memory.
 pub struct Fdt<'a> {

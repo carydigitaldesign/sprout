@@ -5,3 +5,9 @@ xtask = "run --quiet --package xtask --"
 # Frame pointers make kernel backtraces possible (kernel/src/arch/riscv64/backtrace.rs).
 [target.riscv64gc-unknown-none-elf]
 rustflags = ["-C", "force-frame-pointers=yes"]
+
+# x86_64: frame pointers for backtraces; a static, non-PIE kernel linked in
+# the top 2 GiB (the "kernel" code model), which is where linker-x86_64.ld
+# puts it. User programs share the flags; small addresses fit the model too.
+[target.x86_64-unknown-none]
+rustflags = ["-C", "force-frame-pointers=yes", "-C", "relocation-model=static", "-C", "code-model=kernel"]

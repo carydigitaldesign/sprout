@@ -58,7 +58,10 @@ fn consider(node: &Node) {
 
 /// Finds and registers devices. Runs after memory and interrupts are up.
 pub fn init() {
-    let dtb = mm::boot_info().dtb_pa;
+    let Some(dtb) = mm::boot_info().device_tree else {
+        // No device tree (x86_64): no devices until PCI discovery exists.
+        return;
+    };
     // SAFETY: the device tree blob is reserved and mapped for the kernel's
     // whole life (see `mm::init`).
     let fdt = unsafe { Fdt::from_ptr(phys_to_virt(dtb) as *const u8) }
@@ -105,16 +108,19 @@ pub fn init() {
     }
 }
 
-crate::ktest! {
-    fn a_virtio_block_device_is_found() {
-        let devices = crate::obj::device::all();
-        let block = devices
-            .iter()
-            .find(|d| d.virtio_id == 2)
-            .expect("xtask attaches a virtio-blk device");
-        assert_eq!(block.kind, "virtio-mmio");
-        assert!(block.base >= 0x1000_1000 && block.base < 0x1000_9000);
-        assert!(block.irq >= 1 && block.irq <= 8);
-        assert_eq!(block.pending_irqs(), 0);
+#[cfg(target_arch = "riscv64")]
+mod riscv_tests {
+    crate::ktest! {
+        fn a_virtio_block_device_is_found() {
+            let devices = crate::obj::device::all();
+            let block = devices
+                .iter()
+                .find(|d| d.virtio_id == 2)
+                .expect("xtask attaches a virtio-blk device");
+            assert_eq!(block.kind, "virtio-mmio");
+            assert!(block.base >= 0x1000_1000 && block.base < 0x1000_9000);
+            assert!(block.irq >= 1 && block.irq <= 8);
+            assert_eq!(block.pending_irqs(), 0);
+        }
     }
 }

@@ -59,6 +59,12 @@ def _tail(text: str, n: int = 80) -> list[str]:
     return text.rstrip().splitlines()[-n:]
 
 
+def _arch_flag(arch: str) -> list[str]:
+    if arch not in ("riscv64", "x86_64"):
+        raise ValueError(f"arch must be riscv64 or x86_64, not {arch!r}")
+    return ["--arch", arch]
+
+
 def _xtask(args: list[str], timeout: float = 600) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [CARGO, "xtask", *args],
@@ -115,9 +121,10 @@ def _session(session: str) -> Session:
 
 
 @mcp.tool()
-def build(ktest: bool = False, release: bool = False) -> dict:
-    """Build the kernel (or the test kernel with ktest=True). Returns the ELF path and compiler output."""
-    args = ["build"] + (["--ktest"] if ktest else []) + (["--release"] if release else [])
+def build(ktest: bool = False, release: bool = False, arch: str = "riscv64") -> dict:
+    """Build the kernel (or the test kernel with ktest=True) for arch (riscv64 or x86_64).
+    Returns the ELF path and compiler output."""
+    args = ["build", *_arch_flag(arch)] + (["--ktest"] if ktest else []) + (["--release"] if release else [])
     p = _xtask(args)
     out = p.stdout.strip().splitlines()
     return {
@@ -128,12 +135,12 @@ def build(ktest: bool = False, release: bool = False) -> dict:
 
 
 @mcp.tool()
-def boot(ktest: bool = False, release: bool = False, gdb: bool = False, settle_s: float = 2.0) -> dict:
+def boot(ktest: bool = False, release: bool = False, gdb: bool = False, settle_s: float = 2.0, arch: str = "riscv64") -> dict:
     """Build and boot the kernel in QEMU. Returns a session id for serial_read / serial_write / stop,
     plus whatever the console printed in the first settle_s seconds. The kernel parks after boot and
     prints {"event":"idle"}; serial_read(session, until='"idle"') waits for that. With gdb=True QEMU
     starts halted with a gdbstub on localhost:1234; use gdb_inspect, then serial_read. Call stop when done."""
-    flags = (["--ktest"] if ktest else []) + (["--release"] if release else []) + (["--gdb"] if gdb else [])
+    flags = _arch_flag(arch) + (["--ktest"] if ktest else []) + (["--release"] if release else []) + (["--gdb"] if gdb else [])
     p = _xtask(["qemu-args", *flags])
     if p.returncode != 0:
         return {"ok": False, "stderr": _tail(p.stderr)}
@@ -198,9 +205,10 @@ def sessions() -> list[dict]:
 
 
 @mcp.tool()
-def test(release: bool = False, timeout_s: float = 180) -> dict:
-    """Build the test kernel, boot it, run every ktest. The gate for any change: ok must be true."""
-    args = ["test", "--timeout", str(int(timeout_s))] + (["--release"] if release else [])
+def test(release: bool = False, timeout_s: float = 180, arch: str = "riscv64") -> dict:
+    """Build the test kernel, boot it, run every ktest. The gate for any change: ok must be true,
+    on both architectures (arch = riscv64 or x86_64) when arch code or the boot path changed."""
+    args = ["test", *_arch_flag(arch), "--timeout", str(int(timeout_s))] + (["--release"] if release else [])
     try:
         p = _xtask(args, timeout=timeout_s + 600)
     except subprocess.TimeoutExpired:
@@ -253,10 +261,10 @@ def mcp_check(timeout_s: float = 240) -> dict:
 
 
 @mcp.tool()
-def symbolize(addrs: list[str], ktest: bool = False, release: bool = False) -> dict:
+def symbolize(addrs: list[str], ktest: bool = False, release: bool = False, arch: str = "riscv64") -> dict:
     """Resolve kernel addresses (e.g. the "frames" of a panic or trap line) to function, file and line.
     Use ktest=True for addresses from the test kernel. `test` already does this for failures."""
-    flags = (["--ktest"] if ktest else []) + (["--release"] if release else [])
+    flags = _arch_flag(arch) + (["--ktest"] if ktest else []) + (["--release"] if release else [])
     p = _xtask(["symbolize", *flags, *addrs], timeout=60)
     if p.returncode != 0:
         return {"ok": False, "stderr": _tail(p.stderr)}
@@ -270,9 +278,9 @@ def loc() -> str:
 
 
 @mcp.tool()
-def lint() -> dict:
+def lint(arch: str = "riscv64") -> dict:
     """Check that every unsafe block has a // SAFETY: comment."""
-    p = _xtask(["lint"])
+    p = _xtask(["lint", *_arch_flag(arch)])
     return {"ok": p.returncode == 0, "output": _tail(p.stdout, 100)}
 
 

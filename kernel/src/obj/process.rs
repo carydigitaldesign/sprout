@@ -365,7 +365,11 @@ mod tests {
             image[24..32].copy_from_slice(&0u64.to_le_bytes());
             let broken = spawn("broken", &image, Vec::new()).expect("spawn");
             let code = broken.wait();
-            assert_eq!(code, 128 + 12, "instruction page fault, reported as 128 + cause");
+            assert_eq!(
+                code,
+                arch::EXIT_CODE_INSTRUCTION_FAULT,
+                "instruction fault, reported as 128 + cause"
+            );
             sched::yield_now();
         }
     }

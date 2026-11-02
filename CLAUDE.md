@@ -5,8 +5,8 @@ decision records in `docs/adr/` explain why.
 
 ## What this is
 
-Sprout: a from-scratch capability microkernel in `no_std` Rust. First target
-riscv64 on QEMU `virt`. The kernel is self-describing so an MCP agent can
+Sprout: a from-scratch capability microkernel in `no_std` Rust. Runs on
+riscv64 (QEMU `virt`, the default) and x86_64 (QEMU `pc`, Multiboot). The kernel is self-describing so an MCP agent can
 drive it, and the dev loop is itself an MCP server (`tools/mcp-dev`, loaded
 via `.mcp.json`).
 
@@ -28,6 +28,8 @@ Unix-only tool from `xtask`; CI on Ubuntu will catch it, but do not make it.
 
 ```
 cargo xtask build [--ktest]       # cross-compile the kernel; prints the ELF path
+                                  # (every command takes --arch riscv64|x86_64,
+                                  #  or SPROUT_ARCH; default riscv64)
 cargo xtask run [--timeout N]     # boot in QEMU, serial on stdout; the kernel idles,
                                   # so the run ends at the timeout (default 60s) with 0
 cargo xtask run --gdb             # boot halted with a gdbstub on :1234
@@ -50,9 +52,13 @@ over running these by hand; they return structured results.
 
 ## Rules
 
-- Every change must boot and pass `cargo xtask test` before it is done.
+- Every change must boot and pass `cargo xtask test` before it is done; a
+  change under `arch/`, in the boot path or in `mm` passes it on both
+  architectures (`--arch x86_64` too).
 - Every `unsafe` block carries a `// SAFETY:` comment stating the invariant.
 - Architecture-specific code lives only under `kernel/src/arch/<arch>/`.
+  Both ports export the same surface (listed in `kernel/src/arch/mod.rs`)
+  and hand the portable kernel a `Handoff` (`kernel/src/handoff.rs`).
 - The kernel runs in the higher half. Reach physical memory through
   `arch::phys_to_virt`; frames come from `mm::frame` and go back there.
   Every allocator test checks the free count before and after.
@@ -111,6 +117,9 @@ over running these by hand; they return structured results.
   `claude mcp add --transport http sprout-os http://127.0.0.1:8080/mcp`
   connects Claude Code to a running kernel. Only one QEMU can hold the
   port, so never run `test`/`run`/`mcp-check` concurrently.
+- x86_64 has no virtio devices yet (it needs virtio-pci), so `blkd` and
+  `mcpd` do not run there and `init` reports those checks as skipped;
+  `mcp-check` is riscv64-only.
 - The kernel's description carries `"mode":"test"` in the test kernel;
   `init` uses it to shut services down so the run can end.
 

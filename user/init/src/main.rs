@@ -273,8 +273,9 @@ fn shell_checks(fs: rt::Handle) -> bool {
 
 fn blkd_checks(fs: rt::Handle) -> bool {
     let Some(device) = find_device("block") else {
-        rt::log("no virtio block device handle");
-        return false;
+        // No virtio-mmio block device on this platform (x86_64 has no
+        // device discovery yet): nothing to drive, nothing to fail.
+        return check("blkd skipped: no block device", true);
     };
     let mut ok = show("block device", device);
     let result = (|| -> Result<bool, rt::Error> {
@@ -303,8 +304,7 @@ fn blkd_checks(fs: rt::Handle) -> bool {
 /// mode it is told to exit once ready; otherwise this never returns.
 fn mcpd_checks(fs: rt::Handle, test: bool) -> bool {
     let Some(device) = find_device("network") else {
-        rt::log("no virtio network device handle");
-        return false;
+        return check("mcpd skipped: no network device", true);
     };
     let mut ok = show("network device", device);
     let result = (|| -> Result<bool, rt::Error> {

@@ -155,6 +155,7 @@ near.
 | Area | Target (lines of Rust, excluding tests) |
 |------|------|
 | `arch/riscv64` (boot, traps, timer, PLIC, SBI, paging glue) | 1,500 |
+| `arch/x86_64` (Multiboot, GDT/IDT, PIC/PIT/COM1, 4-level paging) | 1,500 |
 | `mm` (physical allocator, Sv39, kernel heap) | 1,500 |
 | `sched` and threads | 1,000 |
 | objects, handles, channels, ports | 2,500 |
@@ -178,11 +179,13 @@ crates (`smoltcp`, `virtio-drivers`) because userspace is not the kernel.
 Each milestone ends with: boots in QEMU, kernel tests pass, CI green, and a
 one-page `docs/design/Mx.md` written by whoever did the work, human or AI.
 
-Progress: **M0 to M7 done** (2026-11-02, see `docs/design/M0.md` through
-`M7.md`). The kernel is self-describing, processes talk over channels,
-drivers run in userspace from an initramfs, and `mcpd` serves MCP over
-HTTP from inside the OS: `claude mcp add --transport http sprout-os
-http://127.0.0.1:8080/mcp` against a running kernel. Next: M8.
+Progress: **M0 to M8 done** (2026-11-02, see `docs/design/M0.md` through
+`M8.md`). The kernel is self-describing, processes talk over channels,
+drivers run in userspace from an initramfs, `mcpd` serves MCP over HTTP
+from inside the OS (`claude mcp add --transport http sprout-os
+http://127.0.0.1:8080/mcp` against a running kernel), and the same kernel
+and programs run on riscv64 and x86_64 (`cargo xtask test --arch x86_64`).
+Next: M9+, starting with virtio-pci so x86_64 gets the user drivers.
 
 | M | Name | Done when | Estimate |
 |---|------|-----------|----------|
@@ -194,8 +197,8 @@ http://127.0.0.1:8080/mcp` against a running kernel. Next: M8.
 | **M5** | IPC | `Channel` with bytes and handle passing, `Port`, `call` semantics, shared memory via `Vmo`. `init` spawns a `shell` and talks to it over a channel. | 1 to 2 weeks |
 | **M6** | Userspace drivers | `Interrupt` object, MMIO mapping, virtio-mmio discovery from the device tree. `virtio-console` and `virtio-blk` drivers as userspace programs. initramfs (cpio inside a `Vmo`) and a tiny `fsd`. | 2 weeks |
 | **M7** | Network and MCP bridge | `virtio-net` driver, `netd` on `smoltcp`, `mcpd` serving MCP over HTTP. Claude can call the running OS as an MCP server. | 2 to 3 weeks |
-| **M8** | Second architecture | `arch/x86_64` with Limine. Boots on a laptop, Hyper-V or VirtualBox. SMP on both architectures. | 2 to 3 weeks |
-| **M9+** | Grow | On-disk filesystem, agent runtime (`sprout-agent` hosting MCP servers as sandboxed processes), signed images, hardening pass, fuzzing the syscall layer. | ongoing |
+| **M8** | Second architecture | `arch/x86_64` booted by Multiboot (ADR-0007): every kernel test and `init`'s checks pass on both architectures; `xtask --arch`; CI matrix. SMP and real-hardware boot moved to M9+. | 2 to 3 weeks |
+| **M9+** | Grow | virtio-pci for x86_64 devices, SMP on both architectures, UEFI boot, on-disk filesystem, agent runtime (`sprout-agent` hosting MCP servers as sandboxed processes), signed images, hardening pass, fuzzing the syscall layer. | ongoing |
 
 Estimates assume the AI does most of the typing and a human reviews design, a
 few hours a day. They are optimistic in the way all kernel estimates are.

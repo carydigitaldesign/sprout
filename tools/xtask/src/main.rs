@@ -14,8 +14,60 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-const TARGET: &str = "riscv64gc-unknown-none-elf";
-const QEMU: &str = "qemu-system-riscv64";
+/// The architectures Sprout builds for. Chosen with `--arch` or the
+/// `SPROUT_ARCH` environment variable; riscv64 is the default.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arch {
+    Riscv64,
+    X86_64,
+}
+
+impl Arch {
+    fn parse(name: &str) -> Result<Arch, String> {
+        match name {
+            "riscv64" => Ok(Arch::Riscv64),
+            "x86_64" => Ok(Arch::X86_64),
+            other => Err(format!(
+                "unknown architecture {other:?}; use riscv64 or x86_64"
+            )),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Arch::Riscv64 => "riscv64",
+            Arch::X86_64 => "x86_64",
+        }
+    }
+
+    fn target(self) -> &'static str {
+        match self {
+            Arch::Riscv64 => "riscv64gc-unknown-none-elf",
+            Arch::X86_64 => "x86_64-unknown-none",
+        }
+    }
+
+    fn qemu(self) -> &'static str {
+        match self {
+            Arch::Riscv64 => "qemu-system-riscv64",
+            Arch::X86_64 => "qemu-system-x86_64",
+        }
+    }
+}
+
+static ARCH: std::sync::OnceLock<Arch> = std::sync::OnceLock::new();
+
+fn arch() -> Arch {
+    *ARCH.get().expect("architecture chosen in main")
+}
+
+fn target() -> &'static str {
+    arch().target()
+}
+
+fn qemu_name() -> &'static str {
+    arch().qemu()
+}
 const KERNEL_PACKAGE: &str = "sprout-kernel";
 const KERNEL_BINARY: &str = "sprout-kernel";
 
@@ -26,6 +78,20 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("help");
     let flags = &args[args.len().min(1)..];
+
+    let chosen = flag_value(flags, "--arch")
+        .map(str::to_string)
+        .or_else(|| env::var("SPROUT_ARCH").ok())
+        .unwrap_or_else(|| "riscv64".to_string());
+    match Arch::parse(&chosen) {
+        Ok(a) => {
+            let _ = ARCH.set(a);
+        }
+        Err(e) => {
+            eprintln!("xtask: {e}");
+            return ExitCode::from(2);
+        }
+    }
 
     let result = match command {
         "build" => build(&BuildOptions::from_flags(flags)).map(|path| {
@@ -56,7 +122,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "cargo xtask <command> [flags]
+        "cargo xtask <command> [flags]        (every command takes --arch riscv64|x86_64; default riscv64)
 
   build [--ktest] [--release]            build the kernel; prints the ELF path
   run   [--ktest] [--release] [--gdb] [--timeout SECS]
@@ -134,7 +200,7 @@ fn target_dir(opts: &BuildOptions) -> PathBuf {
 fn kernel_path(opts: &BuildOptions) -> PathBuf {
     let profile = if opts.release { "release" } else { "debug" };
     target_dir(opts)
-        .join(TARGET)
+        .join(target())
         .join(profile)
         .join(KERNEL_BINARY)
 }
@@ -158,7 +224,7 @@ fn build_user(release: bool) -> Result<PathBuf, String> {
         .env("CARGO_PROFILE_RELEASE_STRIP", "debuginfo")
         .arg("build")
         .arg("--target")
-        .arg(TARGET);
+        .arg(target());
     for program in USER_PROGRAMS {
         cmd.args(["--package", program]);
     }
@@ -173,7 +239,7 @@ fn build_user(release: bool) -> Result<PathBuf, String> {
         return Err("user program build failed".to_string());
     }
     let profile = if release { "release" } else { "debug" };
-    let out = dir.join(TARGET).join(profile);
+    let out = dir.join(target()).join(profile);
     let mut files = Vec::new();
     for program in USER_PROGRAMS {
         let bytes = fs::read(out.join(program))
@@ -245,7 +311,7 @@ fn build(opts: &BuildOptions) -> Result<PathBuf, String> {
     let mut cmd = Command::new(cargo());
     cmd.current_dir(root())
         .env("SPROUT_INITRAMFS", &initramfs)
-        .args(["build", "--package", KERNEL_PACKAGE, "--target", TARGET]);
+        .args(["build", "--package", KERNEL_PACKAGE, "--target", target()]);
     if opts.ktest {
         cmd.args(["--features", "ktest"]);
         cmd.arg("--target-dir").arg(target_dir(opts));
@@ -383,64 +449,83 @@ fn qemu_binary() -> String {
         return q;
     }
     let on_path = env::var_os("PATH").is_some_and(|paths| {
-        env::split_paths(&paths)
-            .any(|dir| dir.join(QEMU).exists() || dir.join(format!("{QEMU}.exe")).exists())
+        env::split_paths(&paths).any(|dir| {
+            dir.join(qemu_name()).exists() || dir.join(format!("{}.exe", qemu_name())).exists()
+        })
     });
     if on_path {
-        return QEMU.to_string();
+        return qemu_name().to_string();
     }
-    let windows_default = Path::new(r"C:\Program Files\qemu").join(format!("{QEMU}.exe"));
+    let windows_default = Path::new(r"C:\Program Files\qemu").join(format!("{}.exe", qemu_name()));
     if windows_default.exists() {
         return windows_default.display().to_string();
     }
-    QEMU.to_string()
+    qemu_name().to_string()
 }
 
 fn qemu_argv(kernel: &Path, gdb: bool) -> Vec<String> {
     let mut argv: Vec<String> = vec![qemu_binary()];
-    argv.extend(
-        [
-            "-machine",
-            "virt",
-            "-bios",
-            "default",
-            "-m",
-            "128M",
-            "-smp",
-            "1",
-            "-display",
-            "none",
-            "-serial",
-            "stdio",
-            "-monitor",
-            "none",
-            "-no-reboot",
+    let common = [
+        "-m",
+        "128M",
+        "-smp",
+        "1",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "none",
+        "-no-reboot",
+    ];
+    match arch() {
+        Arch::Riscv64 => {
+            argv.extend(
+                ["-machine", "virt", "-bios", "default"]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            argv.extend(common.iter().map(|s| s.to_string()));
             // Modern virtio-mmio (version 2), which sprout-virtio speaks.
-            "-global",
-            "virtio-mmio.force-legacy=false",
-            "-kernel",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
-    argv.push(kernel.display().to_string());
-    if let Ok(disk) = disk_image() {
-        argv.push("-drive".to_string());
-        argv.push(format!(
-            "file={},if=none,format=raw,id=disk0",
-            disk.display()
-        ));
-        argv.push("-device".to_string());
-        argv.push("virtio-blk-device,drive=disk0".to_string());
+            argv.extend(
+                ["-global", "virtio-mmio.force-legacy=false"]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            argv.push("-kernel".to_string());
+            argv.push(kernel.display().to_string());
+            if let Ok(disk) = disk_image() {
+                argv.push("-drive".to_string());
+                argv.push(format!(
+                    "file={},if=none,format=raw,id=disk0",
+                    disk.display()
+                ));
+                argv.push("-device".to_string());
+                argv.push("virtio-blk-device,drive=disk0".to_string());
+            }
+            // User-mode networking: the guest is 10.0.2.15; its port 80
+            // (mcpd) is reachable from the host at 127.0.0.1:HOST_MCP_PORT.
+            argv.push("-netdev".to_string());
+            argv.push(format!(
+                "user,id=net0,hostfwd=tcp:127.0.0.1:{HOST_MCP_PORT}-:80"
+            ));
+            argv.push("-device".to_string());
+            argv.push("virtio-net-device,netdev=net0".to_string());
+        }
+        Arch::X86_64 => {
+            // The default `pc` machine, booted through QEMU's Multiboot
+            // loader. isa-debug-exit lets the kernel end the run. No virtio
+            // devices yet: x86 uses virtio-pci, which Sprout cannot drive.
+            argv.extend(common.iter().map(|s| s.to_string()));
+            argv.push("-kernel".to_string());
+            argv.push(kernel.display().to_string());
+            argv.extend(
+                ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+        }
     }
-    // User-mode networking: the guest is 10.0.2.15; its port 80 (mcpd) is
-    // reachable from the host at 127.0.0.1:HOST_MCP_PORT.
-    argv.push("-netdev".to_string());
-    argv.push(format!(
-        "user,id=net0,hostfwd=tcp:127.0.0.1:{HOST_MCP_PORT}-:80"
-    ));
-    argv.push("-device".to_string());
-    argv.push("virtio-net-device,netdev=net0".to_string());
     if gdb {
         // Halt at reset with a gdbstub on localhost:1234.
         argv.extend(["-s", "-S"].iter().map(|s| s.to_string()));
@@ -466,7 +551,12 @@ fn spawn_qemu(argv: &[String], stdin: Stdio) -> Result<Child, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| format!("could not start {QEMU}: {e} (is QEMU installed and on PATH?)"))
+        .map_err(|e| {
+            format!(
+                "could not start {}: {e} (is QEMU installed and on PATH?)",
+                qemu_name()
+            )
+        })
 }
 
 /// Streams QEMU's serial output line by line to `on_line` until it exits or
@@ -595,7 +685,9 @@ fn test(flags: &[String]) -> Result<u8, String> {
 /// Line-count targets per kernel subsystem, from PLAN.md section 2.3.
 /// Guidance, not a gate: `loc` warns and always exits 0.
 const LOC_TARGETS: &[(&str, usize)] = &[
-    ("arch", 1_500),
+    ("arch", 100),
+    ("arch/riscv64", 1_500),
+    ("arch/x86_64", 1_500),
     ("mm", 1_500),
     ("sched", 1_000),
     ("obj", 1_500),
@@ -645,8 +737,14 @@ fn loc() -> u8 {
     let mut total = 0;
     for file in &files {
         let rel = file.strip_prefix(&src).unwrap_or(file);
-        let area = match rel.components().next() {
-            Some(c) if rel.components().count() > 1 => c.as_os_str().to_string_lossy().into_owned(),
+        let parts: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let area = match parts.as_slice() {
+            // Each architecture is its own area, measured against one target.
+            [arch, port, _, ..] if arch == "arch" => format!("arch/{port}"),
+            [dir, _, ..] => dir.clone(),
             _ => rel
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -661,7 +759,7 @@ fn loc() -> u8 {
     }
     per_area.sort();
 
-    println!("{:<12} {:>7} {:>7}  note", "area", "lines", "target");
+    println!("{:<14} {:>7} {:>7}  note", "area", "lines", "target");
     for (area, n) in &per_area {
         let target = LOC_TARGETS.iter().find(|(a, _)| a == area).map(|(_, t)| *t);
         let (t, note) = match target {
@@ -672,14 +770,14 @@ fn loc() -> u8 {
             Some(t) => (t.to_string(), ""),
             None => ("-".to_string(), "no target yet"),
         };
-        println!("{area:<12} {n:>7} {t:>7}  {note}");
+        println!("{area:<14} {n:>7} {t:>7}  {note}");
     }
     let note = if total > LOC_KERNEL_TARGET {
         "over target"
     } else {
         ""
     };
-    println!("{:<12} {total:>7} {LOC_KERNEL_TARGET:>7}  {note}", "kernel");
+    println!("{:<14} {total:>7} {LOC_KERNEL_TARGET:>7}  {note}", "kernel");
     0
 }
 
@@ -790,6 +888,12 @@ fn mcp_post(port: u16, body: &str) -> Result<String, String> {
 /// the host: initialize, tools/list, and a shell ping. Exit 0 if all three
 /// answered as expected.
 fn mcp_check(flags: &[String]) -> Result<u8, String> {
+    if arch() != Arch::Riscv64 {
+        return Err(format!(
+            "mcp-check needs a network device, which {} has no driver for yet",
+            arch().name()
+        ));
+    }
     let kernel = build(&BuildOptions::from_flags(flags))?;
     let timeout = timeout_from(flags, 120)?;
     let argv = qemu_argv(&kernel, false);
