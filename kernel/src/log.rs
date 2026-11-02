@@ -134,6 +134,20 @@ impl Line {
         self
     }
 
+    /// Adds an array of addresses as `"0x..."` strings.
+    pub fn hex_list(mut self, key: &str, values: impl IntoIterator<Item = usize>) -> Self {
+        self.key(key);
+        let _ = Console.write_str("[");
+        for (i, value) in values.into_iter().enumerate() {
+            if i > 0 {
+                let _ = Console.write_str(",");
+            }
+            let _ = write!(Console, "\"{value:#x}\"");
+        }
+        let _ = Console.write_str("]");
+        self
+    }
+
     /// Closes the object and ends the line.
     pub fn end(self) {
         let _ = Console.write_str("}\n");

@@ -8,6 +8,7 @@ core::arch::global_asm!(
     r#"
     .section .text.boot, "ax"
     .globl _start
+    .type _start, @function
 _start:
     // Global pointer for gp-relative data access. Relaxation must be off for
     // this one instruction or the assembler turns it into `mv gp, gp`.
@@ -26,11 +27,15 @@ _start:
     addi t0, t0, 8
     j 1b
 2:
+    // A zero frame pointer ends every backtrace walk here.
+    mv s0, zero
+
     // a0 = hart id, a1 = dtb: passed through unchanged to kmain(hartid, dtb).
     call kmain
 
     // kmain never returns; park if it somehow does.
 3:  wfi
     j 3b
+    .size _start, . - _start
 "#
 );

@@ -28,9 +28,12 @@ Unix-only tool from `xtask`; CI on Ubuntu will catch it, but do not make it.
 
 ```
 cargo xtask build [--ktest]       # cross-compile the kernel; prints the ELF path
-cargo xtask run [--timeout N]     # boot in QEMU, serial on stdout
+cargo xtask run [--timeout N]     # boot in QEMU, serial on stdout; the kernel idles,
+                                  # so the run ends at the timeout (default 60s) with 0
 cargo xtask run --gdb             # boot halted with a gdbstub on :1234
 cargo xtask test                  # boot the test kernel; exit 0 only if all pass
+cargo xtask symbolize ADDR...     # function/file/line for kernel addresses (--ktest
+                                  # for addresses from the test kernel)
 cargo xtask lint                  # every unsafe block needs a // SAFETY: comment
 cargo xtask loc                   # line counts vs. the targets in PLAN.md
 cargo xtask qemu-args             # the QEMU argv as JSON (used by the MCP server)
@@ -38,7 +41,9 @@ cargo xtask qemu-args             # the QEMU argv as JSON (used by the MCP serve
 
 Tests are declared with `crate::ktest! { fn name() { ... } }` next to the
 code they cover and run inside QEMU. A failing test stops the run (M0
-limitation), so read the first `"ok":false` line.
+limitation), so read the first `"ok":false` line. Panics, traps and failed
+tests carry a `frames` array; `xtask test` symbolizes them into the summary
+under `symbols`, and `xtask run` prints a `{"event":"symbols"}` line.
 
 Prefer the MCP tools (`build`, `boot`, `serial_read`, `test`, `gdb_inspect`)
 over running these by hand; they return structured results.

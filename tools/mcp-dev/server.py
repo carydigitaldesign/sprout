@@ -130,8 +130,9 @@ def build(ktest: bool = False, release: bool = False) -> dict:
 @mcp.tool()
 def boot(ktest: bool = False, release: bool = False, gdb: bool = False, settle_s: float = 2.0) -> dict:
     """Build and boot the kernel in QEMU. Returns a session id for serial_read / serial_write / stop,
-    plus whatever the console printed in the first settle_s seconds. With gdb=True QEMU starts halted
-    with a gdbstub on localhost:1234; use gdb_inspect, then serial_read."""
+    plus whatever the console printed in the first settle_s seconds. The kernel parks after boot and
+    prints {"event":"idle"}; serial_read(session, until='"idle"') waits for that. With gdb=True QEMU
+    starts halted with a gdbstub on localhost:1234; use gdb_inspect, then serial_read. Call stop when done."""
     flags = (["--ktest"] if ktest else []) + (["--release"] if release else []) + (["--gdb"] if gdb else [])
     p = _xtask(["qemu-args", *flags])
     if p.returncode != 0:
@@ -229,6 +230,17 @@ def gdb_inspect(session: str, commands: list[str]) -> dict:
     argv.append(s.kernel)
     p = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, timeout=60)
     return {"ok": p.returncode == 0, "gdb": gdb, "stdout": _tail(p.stdout, 200), "stderr": _tail(p.stderr, 40)}
+
+
+@mcp.tool()
+def symbolize(addrs: list[str], ktest: bool = False, release: bool = False) -> dict:
+    """Resolve kernel addresses (e.g. the "frames" of a panic or trap line) to function, file and line.
+    Use ktest=True for addresses from the test kernel. `test` already does this for failures."""
+    flags = (["--ktest"] if ktest else []) + (["--release"] if release else [])
+    p = _xtask(["symbolize", *flags, *addrs], timeout=60)
+    if p.returncode != 0:
+        return {"ok": False, "stderr": _tail(p.stderr)}
+    return {"ok": True, "addrs": [_parse(l) for l in p.stdout.splitlines() if l.strip()]}
 
 
 @mcp.tool()

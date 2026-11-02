@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         "run" => run(flags),
         "test" => test(flags),
         "qemu-args" => qemu_args_command(flags),
+        "symbolize" => symbolize_command(flags),
         "loc" => Ok(loc()),
         "lint" => Ok(lint()),
         _ => {
@@ -58,9 +59,11 @@ fn print_help() {
 
   build [--ktest] [--release]            build the kernel; prints the ELF path
   run   [--ktest] [--release] [--gdb] [--timeout SECS]
-                                         boot in QEMU, serial on stdout (default timeout 60s)
+                                         boot in QEMU, serial on stdout; an idling kernel
+                                         ends at the timeout (default 60s) with exit 0
   test  [--release] [--timeout SECS]     boot the test kernel; exit 0 only if every test passed
   qemu-args [--ktest] [--release] [--gdb] build, then print the QEMU argv as a JSON array
+  symbolize [--ktest] [--release] ADDR... function, file and line for kernel addresses
   loc                                    line counts per subsystem vs. PLAN.md targets
   lint                                   every `unsafe` block needs a // SAFETY: comment"
     );
@@ -118,20 +121,30 @@ impl BuildOptions {
     }
 }
 
+/// Where cargo puts the kernel for these options. The test kernel builds into
+/// its own target directory so switching between the two does not rebuild
+/// everything each time.
+fn target_dir(opts: &BuildOptions) -> PathBuf {
+    let dir = root().join("target");
+    if opts.ktest { dir.join("ktest") } else { dir }
+}
+
+fn kernel_path(opts: &BuildOptions) -> PathBuf {
+    let profile = if opts.release { "release" } else { "debug" };
+    target_dir(opts)
+        .join(TARGET)
+        .join(profile)
+        .join(KERNEL_BINARY)
+}
+
 /// Cross-compiles the kernel and returns the path of the ELF.
-///
-/// The test kernel builds into its own target directory so switching between
-/// the two does not rebuild everything each time.
 fn build(opts: &BuildOptions) -> Result<PathBuf, String> {
-    let root = root();
-    let mut target_dir = root.join("target");
     let mut cmd = Command::new(cargo());
-    cmd.current_dir(&root)
+    cmd.current_dir(root())
         .args(["build", "--package", KERNEL_PACKAGE, "--target", TARGET]);
     if opts.ktest {
-        target_dir = target_dir.join("ktest");
         cmd.args(["--features", "ktest"]);
-        cmd.arg("--target-dir").arg(&target_dir);
+        cmd.arg("--target-dir").arg(target_dir(opts));
     }
     if opts.release {
         cmd.arg("--release");
@@ -143,9 +156,118 @@ fn build(opts: &BuildOptions) -> Result<PathBuf, String> {
     if !status.success() {
         return Err("kernel build failed".to_string());
     }
+    Ok(kernel_path(opts))
+}
 
-    let profile = if opts.release { "release" } else { "debug" };
-    Ok(target_dir.join(TARGET).join(profile).join(KERNEL_BINARY))
+// -------------------------------------------------------------- symbolize
+
+/// Makes a source path from DWARF relative to the repository and
+/// forward-slashed, so it reads the same on every host.
+fn repo_relative(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let root = root().display().to_string().replace('\\', "/");
+    path.strip_prefix(&root)
+        .map(|rest| rest.trim_start_matches('/').to_string())
+        .unwrap_or(path)
+}
+
+/// Resolves kernel addresses to `{"addr", "frames": [{"fn", "file", "line"}]}`
+/// from the ELF's DWARF, in-process. Inlined call chains give several frames
+/// per address, innermost first; a return address is backed up by one byte so
+/// a frame reports the call, not whatever follows it.
+fn symbolize(elf: &Path, addrs: &[String]) -> Result<Vec<Value>, String> {
+    if addrs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let loader = addr2line::Loader::new(elf)
+        .map_err(|e| format!("could not load {}: {e}", elf.display()))?;
+
+    let mut results = Vec::with_capacity(addrs.len());
+    for addr in addrs {
+        let value = u64::from_str_radix(addr.trim_start_matches("0x"), 16)
+            .map_err(|_| format!("not a hex address: {addr}"))?;
+        let probe = value.saturating_sub(1);
+        let mut frames = Vec::new();
+        if let Ok(mut iter) = loader.find_frames(probe) {
+            while let Ok(Some(frame)) = iter.next() {
+                let function = frame
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.demangle().ok().map(|s| s.into_owned()))
+                    .unwrap_or_else(|| "??".to_string());
+                let (file, line) = match &frame.location {
+                    Some(loc) => (loc.file.map(repo_relative), loc.line),
+                    None => (None, None),
+                };
+                frames.push(json!({ "fn": function, "file": file, "line": line }));
+            }
+        }
+        if frames.is_empty() {
+            // No line info: fall back to the symbol table.
+            let name = loader
+                .find_symbol(probe)
+                .map(|s| addr2line::demangle_auto(s.into(), None).into_owned())
+                .unwrap_or_else(|| "??".to_string());
+            frames.push(json!({ "fn": name, "file": null, "line": null }));
+        }
+        results.push(json!({ "addr": addr, "frames": frames }));
+    }
+    Ok(results)
+}
+
+fn symbolize_command(flags: &[String]) -> Result<u8, String> {
+    let opts = BuildOptions::from_flags(flags);
+    let addrs: Vec<String> = flags
+        .iter()
+        .filter(|f| !f.starts_with("--"))
+        .cloned()
+        .collect();
+    let elf = kernel_path(&opts);
+    if !elf.exists() {
+        return Err(format!("{} does not exist; build first", elf.display()));
+    }
+    for entry in symbolize(&elf, &addrs)? {
+        println!("{entry}");
+    }
+    Ok(0)
+}
+
+/// Collects every address from `"frames"` arrays seen in kernel JSON lines, so
+/// a run can be symbolized once it ends.
+#[derive(Default)]
+struct FrameCollector {
+    addrs: Vec<String>,
+}
+
+impl FrameCollector {
+    fn observe(&mut self, v: &Value) {
+        let Some(frames) = v.get("frames").and_then(Value::as_array) else {
+            return;
+        };
+        for addr in frames.iter().filter_map(Value::as_str) {
+            if !self.addrs.iter().any(|a| a == addr) {
+                self.addrs.push(addr.to_string());
+            }
+        }
+    }
+
+    /// Prints a `{"event":"symbols", ...}` line and returns the map.
+    fn report(&self, elf: &Path) -> Value {
+        if self.addrs.is_empty() {
+            return Value::Null;
+        }
+        match symbolize(elf, &self.addrs) {
+            Ok(entries) => {
+                let line = json!({ "event": "symbols", "addrs": entries });
+                println!("{line}");
+                Value::Array(entries)
+            }
+            Err(e) => {
+                eprintln!("xtask: could not symbolize backtrace: {e}");
+                Value::Null
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------- qemu
@@ -256,13 +378,30 @@ fn stream(mut child: Child, timeout: Duration, mut on_line: impl FnMut(&str)) ->
 
 // -------------------------------------------------------------------- run
 
+/// Boots the kernel and streams its console. A kernel that reached
+/// `{"event":"idle"}` has nothing more to say, so hitting the timeout after
+/// that counts as a normal end.
 fn run(flags: &[String]) -> Result<u8, String> {
     let kernel = build(&BuildOptions::from_flags(flags))?;
     let timeout = timeout_from(flags, 60)?;
     let argv = qemu_argv(&kernel, has_flag(flags, "--gdb"));
     let child = spawn_qemu(&argv, Stdio::inherit())?;
-    match stream(child, timeout, |line| println!("{line}")) {
+
+    let mut idle = false;
+    let mut frames = FrameCollector::default();
+    let exit = stream(child, timeout, |line| {
+        println!("{line}");
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            frames.observe(&v);
+            if v.get("event").and_then(Value::as_str) == Some("idle") {
+                idle = true;
+            }
+        }
+    });
+    frames.report(&kernel);
+    match exit {
         Some(code) => Ok(code.clamp(0, 255) as u8),
+        None if idle => Ok(0),
         None => Ok(EXIT_TIMEOUT),
     }
 }
@@ -287,12 +426,14 @@ fn test(flags: &[String]) -> Result<u8, String> {
     let mut failed: Vec<Value> = Vec::new();
     let mut exit_code: Option<i64> = None;
     let mut panic: Option<Value> = None;
+    let mut frames = FrameCollector::default();
 
     let qemu_exit = stream(child, timeout, |line| {
         println!("{line}");
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return;
         };
+        frames.observe(&v);
         if v.get("test").is_some() {
             match v.get("ok").and_then(Value::as_bool) {
                 Some(true) => passed += 1,
@@ -306,6 +447,7 @@ fn test(flags: &[String]) -> Result<u8, String> {
         }
     });
 
+    let symbols = frames.report(&kernel);
     let ok = failed.is_empty() && exit_code == Some(0) && panic.is_none();
     let summary = json!({
         "summary": {
@@ -314,6 +456,7 @@ fn test(flags: &[String]) -> Result<u8, String> {
             "failed": failed.len(),
             "failures": failed,
             "panic": panic,
+            "symbols": symbols,
             "exit_event": exit_code,
             "qemu_exit": qemu_exit,
             "timed_out": qemu_exit.is_none(),

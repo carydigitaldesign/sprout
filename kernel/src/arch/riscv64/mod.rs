@@ -1,17 +1,25 @@
 //! riscv64 on the QEMU `virt` machine, booted by OpenSBI.
 
+mod backtrace;
 mod boot;
+// Every CSR gets read and write; not every milestone uses both.
+#[allow(dead_code)]
+mod csr;
 mod exit;
 mod sbi;
+mod trap;
 
+pub use backtrace::{frame_pointer, frames_from as stack_frames};
 pub use exit::exit;
 
 /// Architecture name for logs.
 pub const NAME: &str = "riscv64";
 
-/// Runs before the first log line: discover which SBI console we have.
+/// Runs before the first log line: find the SBI console, install the trap
+/// vector so a fault from here on is reported rather than silent.
 pub fn init_early() {
     sbi::init();
+    trap::init();
 }
 
 /// Writes one byte to the firmware console.

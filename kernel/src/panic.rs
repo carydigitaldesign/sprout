@@ -1,15 +1,27 @@
-//! Panics become one JSON line and a machine stop. Inside the test kernel a
-//! panic fails the running test instead of the whole run's reporting.
+//! Panics become one JSON line with a backtrace, then a machine stop. Inside
+//! the test kernel a panic fails the running test instead.
 
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{arch, log};
 
 /// Exit code for a kernel panic outside of tests.
 const EXIT_PANIC: u32 = 2;
+/// Most frames a panic line will carry.
+const MAX_FRAMES: usize = 32;
+
+static PANICKING: AtomicBool = AtomicBool::new(false);
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // A panic while reporting a panic (console broken, bad frame pointer)
+    // would recurse forever. Stop instead; the first line already went out.
+    if PANICKING.swap(true, Ordering::AcqRel) {
+        arch::exit(EXIT_PANIC);
+    }
+    let frames = arch::stack_frames(arch::frame_pointer()).take(MAX_FRAMES);
+
     #[cfg(feature = "ktest")]
     if let Some(test) = crate::testing::current() {
         /// Exit code when a kernel test fails.
@@ -21,7 +33,7 @@ fn panic(info: &PanicInfo) -> ! {
         if let Some(loc) = info.location() {
             line = line.str("file", loc.file()).num("line", loc.line());
         }
-        line.end();
+        line.hex_list("frames", frames).end();
         arch::exit(EXIT_TEST_FAILED);
     }
 
@@ -29,6 +41,6 @@ fn panic(info: &PanicInfo) -> ! {
     if let Some(loc) = info.location() {
         line = line.str("file", loc.file()).num("line", loc.line());
     }
-    line.end();
+    line.hex_list("frames", frames).end();
     arch::exit(EXIT_PANIC)
 }

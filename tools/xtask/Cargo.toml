@@ -8,3 +8,5 @@ publish.workspace = true
 
 [dependencies]
 serde_json = "1"
+# In-process DWARF symbolization for kernel backtraces; no external binaries.
+addr2line = "0.24"

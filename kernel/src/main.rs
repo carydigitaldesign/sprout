@@ -40,11 +40,10 @@ pub extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
 
     #[cfg(not(feature = "ktest"))]
     {
-        log::info(
-            "boot",
-            "Sprout is up; nothing to schedule yet, shutting down",
-        )
-        .end();
-        arch::exit(0)
+        log::info("boot", "Sprout is up; nothing to schedule yet").end();
+        // Nothing can wake us before M3 (no interrupt sources are enabled),
+        // so this is where `cargo xtask run` and MCP `boot` sessions sit.
+        log::event("idle").end();
+        arch::wait_forever()
     }
 }

@@ -1,3 +1,7 @@
 [alias]
-# `cargo xtask <command>`: build, run, test, loc, lint, qemu-args.
+# `cargo xtask <command>`: build, run, test, loc, lint, qemu-args, symbolize.
 xtask = "run --quiet --package xtask --"
+
+# Frame pointers make kernel backtraces possible (kernel/src/arch/riscv64/backtrace.rs).
+[target.riscv64gc-unknown-none-elf]
+rustflags = ["-C", "force-frame-pointers=yes"]
