@@ -119,7 +119,9 @@ over running these by hand; they return structured results.
   port, so never run `test`/`run`/`mcp-check` concurrently.
 - x86_64 has no virtio devices yet (it needs virtio-pci), so `blkd` and
   `mcpd` do not run there and `init` reports those checks as skipped;
-  `mcp-check` is riscv64-only.
+  `mcp-check` is riscv64-only. x86_64 logs to COM1 and the VGA text screen;
+  `tools/mkiso.sh` (Linux or WSL; CI's `iso` job) wraps the kernel in a
+  GRUB ISO that boots on BIOS machines and VirtualBox or Hyper-V Gen 1.
 - The kernel's description carries `"mode":"test"` in the test kernel;
   `init` uses it to shut services down so the run can end.
 

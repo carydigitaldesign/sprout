@@ -1,6 +1,7 @@
 //! x86_64 on QEMU's `pc` machine, booted by a Multiboot loader. Legacy
-//! devices only for now: 8259 PICs, the 8254 timer and COM1, all behind
-//! port I/O. The local APIC, PCI and SMP come later.
+//! devices only for now: 8259 PICs, the 8254 timer, COM1 and the VGA
+//! text buffer, all behind port I/O or one fixed page. The local APIC,
+//! PCI and SMP come later.
 
 mod backtrace;
 mod boot;
@@ -19,6 +20,7 @@ mod pit;
 mod ports;
 mod serial;
 mod user;
+mod vga;
 
 pub use backtrace::{boot_stack, frame_pointer, frames_from as stack_frames, set_current_stack};
 pub use context::{Context, switch};
@@ -37,12 +39,13 @@ pub const NAME: &str = "x86_64";
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub const EXIT_CODE_INSTRUCTION_FAULT: i32 = 128 + 14;
 
-/// Runs before the first log line: the serial port, then a real GDT with
+/// Runs before the first log line: the serial port and the screen, then a real GDT with
 /// a TSS and the IDT so a fault from here on is reported, the interrupt
 /// controllers with every line masked, and the backtrace walker's view
 /// of the boot stack.
 pub fn init_early() {
     serial::init();
+    vga::init();
     gdt::init();
     idt::init();
     pic::init();
@@ -63,18 +66,27 @@ pub fn supports_page_size(size: PageSize) -> bool {
 /// Adds the platform's own mappings to the kernel table. The image sits
 /// in the top 2 GiB rather than inside the direct map, so its physical
 /// pages are mapped there too (writable, not executable): the direct map
-/// then covers all of RAM, as the rest of the kernel expects.
+/// then covers all of RAM, as the rest of the kernel expects. The VGA
+/// text buffer, below the RAM the hand-off reports, is mapped as well.
 pub fn map_platform(
     table: &mut PageTable,
     kernel_start_pa: usize,
     kernel_end_pa: usize,
 ) -> Result<(), MapError> {
+    let rw = MapFlags::READ | MapFlags::WRITE;
     mm::map_range(
         table,
         phys_to_virt(kernel_start_pa),
         kernel_start_pa,
         kernel_end_pa - kernel_start_pa,
-        MapFlags::READ | MapFlags::WRITE,
+        rw,
+    )?;
+    mm::map_range(
+        table,
+        phys_to_virt(vga::BUFFER_PA),
+        vga::BUFFER_PA,
+        vga::BUFFER_BYTES,
+        rw,
     )
 }
 
@@ -105,13 +117,15 @@ pub fn timer_cycles() -> u64 {
 /// The PIT is periodic, so there is nothing to arm per tick.
 pub fn set_timer(_deadline: u64) {}
 
-/// Writes one byte to COM1.
+/// Writes one byte to COM1 and the screen. Called by `log`'s console
+/// writer under the console lock, which the screen relies on.
 pub fn console_putc(byte: u8) {
     serial::putc(byte);
+    vga::putc(byte);
 }
 
 pub fn console_backend() -> &'static str {
-    "com1"
+    "com1+vga"
 }
 
 crate::ktest! {

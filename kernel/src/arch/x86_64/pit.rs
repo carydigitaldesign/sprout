@@ -7,8 +7,10 @@ const CHANNEL0: u16 = 0x40;
 const COMMAND: u16 = 0x43;
 /// The PIT's input clock.
 const INPUT_HZ: u64 = 1_193_182;
-/// Reload value for about 100 Hz.
-const DIVISOR: u16 = (INPUT_HZ / crate::time::TICK_HZ) as u16;
+/// Reload value for 100 Hz, rounded up so a tick is never shorter than
+/// 10 ms: `time::sleep_ms` promises at least the asked-for time in
+/// ticks.
+const DIVISOR: u16 = INPUT_HZ.div_ceil(crate::time::TICK_HZ) as u16;
 
 /// Starts channel 0 as a 100 Hz rate generator. Interrupts stay masked
 /// until the PIC is set up and `time::init` asks for them.
@@ -55,5 +57,6 @@ pub fn calibrate_tsc() -> u64 {
         last = now;
     }
     let elapsed = super::timer_cycles() - start;
-    elapsed * crate::time::TICK_HZ / PERIODS
+    // The measured span is PERIODS reloads of DIVISOR input cycles.
+    elapsed * INPUT_HZ / (PERIODS * DIVISOR as u64)
 }

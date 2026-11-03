@@ -46,10 +46,23 @@ pub fn ms_to_ticks(ms: u64) -> u64 {
     (ms * TICK_HZ).div_ceil(1000)
 }
 
-/// Blocks the current thread for at least `ms` milliseconds.
+/// Blocks the current thread for at least `ms` milliseconds, as measured
+/// by [`now_ns`].
 pub fn sleep_ms(ms: u64) {
-    // One extra tick: the current tick is already partly spent.
-    sched::sleep_until(ticks() + ms_to_ticks(ms) + 1);
+    let start = now_ns();
+    let wanted = ms * 1_000_000;
+    // One extra tick: the current tick is already partly spent. The tick
+    // and the fine clock can be different oscillators (on x86 the PIT and
+    // the TSC), so the promise is checked on the fine clock and topped up
+    // a tick at a time.
+    let mut until = ticks() + ms_to_ticks(ms) + 1;
+    loop {
+        sched::sleep_until(until);
+        if now_ns().wrapping_sub(start) >= wanted {
+            return;
+        }
+        until = ticks() + 1;
+    }
 }
 
 crate::ktest! {

@@ -185,7 +185,9 @@ drivers run in userspace from an initramfs, `mcpd` serves MCP over HTTP
 from inside the OS (`claude mcp add --transport http sprout-os
 http://127.0.0.1:8080/mcp` against a running kernel), and the same kernel
 and programs run on riscv64 and x86_64 (`cargo xtask test --arch x86_64`).
-Next: M9+, starting with virtio-pci so x86_64 gets the user drivers.
+M9 is in progress (`docs/design/M9.md`): slice 1 added a VGA console and a
+CI-built bootable ISO for x86_64. Next: virtio-pci so x86_64 gets the user
+drivers.
 
 | M | Name | Done when | Estimate |
 |---|------|-----------|----------|

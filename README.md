@@ -21,6 +21,23 @@ now), and serves MCP over HTTP from inside the OS (`cargo xtask run`, then
 `claude mcp add --transport http sprout-os http://127.0.0.1:8080/mcp`).
 See [PLAN.md](PLAN.md), [docs/design/](docs/design/) and [docs/adr/](docs/adr/).
 
+## Try it
+
+Under QEMU, from a checkout (Rust via `rustup`, QEMU installed; see
+`CLAUDE.md` for the commands):
+
+```
+cargo xtask run                      # riscv64: the full system, MCP on :8080
+cargo xtask run --arch x86_64        # x86_64: kernel and user programs, no devices yet
+```
+
+Without a checkout: every green push on `main` attaches a BIOS-bootable
+`sprout-x86_64-iso` artifact to its CI run (Actions tab, sign-in needed to
+download). It boots in VirtualBox, Hyper-V Generation 1, QEMU
+(`-cdrom sprout-x86_64.iso`) and on a BIOS PC, and shows the boot log and
+`init`'s checks on the screen. `tools/mkiso.sh` builds the same ISO on
+Linux or WSL.
+
 ## License
 
 MIT or Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and
