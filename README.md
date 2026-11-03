@@ -17,8 +17,10 @@ and it is built by AI agents through the same protocol.
 
 Status: M0 to M8 done. It boots on riscv64 and x86_64 under QEMU, runs
 user programs from an initramfs with userspace virtio drivers (riscv64 for
-now), and serves MCP over HTTP from inside the OS (`cargo xtask run`, then
-`claude mcp add --transport http sprout-os http://127.0.0.1:8080/mcp`).
+now), and serves MCP over HTTP from inside the OS: `cargo xtask run`, then open a Claude Code session in
+the checkout (`.mcp.json` names the running kernel as the `sprout-os`
+server) or `claude mcp add --transport http sprout-os
+http://127.0.0.1:8080/mcp` from the CLI.
 See [PLAN.md](PLAN.md), [docs/design/](docs/design/) and [docs/adr/](docs/adr/).
 
 ## Try it

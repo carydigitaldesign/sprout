@@ -113,10 +113,12 @@ over running these by hand; they return structured results.
   backed by `target/disk.img`; writes persist, delete the file to reset.
 - QEMU also has a `virtio-net-device` on user networking (guest 10.0.2.15),
   host port 8080 forwarded to guest port 80. `user/mcpd` serves MCP there;
-  `cargo xtask mcp-check` (also in CI) talks to it from the host, and
-  `claude mcp add --transport http sprout-os http://127.0.0.1:8080/mcp`
-  connects Claude Code to a running kernel. Only one QEMU can hold the
-  port, so never run `test`/`run`/`mcp-check` concurrently.
+  `cargo xtask mcp-check` (also in CI) talks to it from the host. `.mcp.json`
+  lists the running kernel as the `sprout-os` server, so a Claude Code
+  session started in this folder gets its tools (the `claude` CLI
+  equivalent: `claude mcp add --transport http sprout-os
+  http://127.0.0.1:8080/mcp`). Only one QEMU can hold the port, so never
+  run `test`/`run`/`mcp-check` concurrently.
 - x86_64 has no virtio devices yet (it needs virtio-pci), so `blkd` and
   `mcpd` do not run there and `init` reports those checks as skipped;
   `mcp-check` is riscv64-only. x86_64 logs to COM1 and the VGA text screen;

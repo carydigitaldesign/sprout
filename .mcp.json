@@ -3,6 +3,10 @@
     "sprout-dev": {
       "command": "python",
       "args": ["tools/mcp-dev/server.py"]
+    },
+    "sprout-os": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp"
     }
   }
 }
