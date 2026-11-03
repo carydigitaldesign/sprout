@@ -848,8 +848,25 @@ fn lint() -> u8 {
 
 // -------------------------------------------------------------- mcp-check
 
-/// One HTTP POST to the in-OS MCP server; returns the response body.
+/// One HTTP POST to the in-OS MCP server, retried a few times: right
+/// after `mcpd` announces itself the forwarded port can still refuse or
+/// reset, and a slow CI runner makes that window longer.
 fn mcp_post(port: u16, body: &str) -> Result<String, String> {
+    const ATTEMPTS: u32 = 5;
+    let mut last = Err("no attempt made".to_string());
+    for attempt in 1..=ATTEMPTS {
+        last = mcp_post_once(port, body);
+        if last.is_ok() {
+            break;
+        }
+        if attempt < ATTEMPTS {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+    last.map_err(|e| format!("{e} (after {ATTEMPTS} attempts)"))
+}
+
+fn mcp_post_once(port: u16, body: &str) -> Result<String, String> {
     use std::io::{Read, Write as _};
     use std::net::TcpStream;
     let mut stream = TcpStream::connect_timeout(
